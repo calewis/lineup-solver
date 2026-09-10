@@ -45,7 +45,12 @@ const newPlayer = (name) => ({ name, pref: "", pref2: "", never: [], out: null }
 // HiGHS (mixed-integer programming) compiled to WebAssembly. Loaded once.
 let highsPromise = null;
 function getHighs() {
-  if (!highsPromise) highsPromise = highsLoader({ locateFile: () => highsWasmUrl });
+  if (!highsPromise) {
+    highsPromise = highsLoader({ locateFile: () => highsWasmUrl }).catch((e) => {
+      highsPromise = null; // let the next solve try the download again
+      throw e;
+    });
+  }
   return highsPromise;
 }
 
@@ -161,6 +166,8 @@ export default function LineupSolver() {
   const setupImportRef = useRef(null);
 
   const tm = useMemo(() => timingOf(cfg), [cfg]);
+  const periodWord = tm.type === "halves" ? "half" : "quarter";
+  const subsPhrase = tm.subTimes.length ? `subs at ${listWithAnd(tm.subTimes)} each ${periodWord}` : "no subs within a period";
 
   const flash = (msg) => {
     setNote(msg);
@@ -236,8 +243,9 @@ export default function LineupSolver() {
     if (!file) return;
     file.text().then((text) => {
       try {
-        const d = loadSetup(JSON.parse(text));
-        if (!Array.isArray(d.players)) throw new Error("bad");
+        const parsed = JSON.parse(text);
+        if (!parsed || !Array.isArray(parsed.players)) throw new Error("bad");
+        const d = loadSetup(parsed);
         setPlayers(d.players);
         setCfg(d.cfg);
         setRules(d.rules);
@@ -263,6 +271,7 @@ export default function LineupSolver() {
   };
   const renamePlayer = (i, name) => {
     const old = players[i].name;
+    if (players.some((p, j) => j !== i && p.name === name)) { flash(`Another player is already called ${name}`); return; }
     setPlayers(players.map((p, j) => (j === i ? { ...p, name } : p)));
     setRules(rules.map((r) => ({ ...r, players: r.players.map((n) => (n === old ? name : n)) })));
     setCfg({ ...cfg, gks: cfg.gks.map((g) => (g === old ? name : g)) });
@@ -325,7 +334,9 @@ export default function LineupSolver() {
   // ----- history -----
   const saveHistory = (h) => {
     setHistory(h);
-    if (!writeJSON(HISTORY_KEY, h)) flash("Couldn't save history on this device");
+    const ok = writeJSON(HISTORY_KEY, h);
+    if (!ok) flash("Couldn't save history on this device");
+    return ok;
   };
   const commitGame = () => {
     if (!result) return;
@@ -339,10 +350,10 @@ export default function LineupSolver() {
       slots,
       minutes: mins,
     };
-    saveHistory([entry, ...history]);
+    const ok = saveHistory([entry, ...history]);
     setCommitOpen(false);
     setCommitLabel("");
-    flash("Game added to history");
+    if (ok) flash("Game added to history");
   };
   const deleteGame = (id) => {
     saveHistory(history.filter((g) => g.id !== id));
@@ -365,8 +376,8 @@ export default function LineupSolver() {
         const seen = new Set(history.map((g) => g.id));
         const merged = [...history, ...incoming.filter((g) => g && g.id && !seen.has(g.id))]
           .sort((a, b) => (b.date || "").localeCompare(a.date || "") || b.id - a.id);
-        saveHistory(merged);
-        flash(`Imported ${merged.length - history.length} game${merged.length - history.length === 1 ? "" : "s"}`);
+        const added = merged.length - history.length;
+        if (saveHistory(merged)) flash(`Imported ${added} game${added === 1 ? "" : "s"}`);
       } catch (e) {
         flash("That file isn't a history export");
       }
@@ -390,14 +401,25 @@ export default function LineupSolver() {
   // Swap two players in one segment. Same row: swap sides, carried through
   // the period. Different rows or the bench: exchange roles and spots in this
   // segment only, then re-check the hard rules.
+  const showSwapNote = (n) => {
+    setSwapNote(n);
+    clearTimeout(swapTimer.current);
+    swapTimer.current = setTimeout(() => setSwapNote(null), 8000);
+  };
   const doSwap = (h, s, a, b) => {
     if (!slots || a === b) return;
     const seg = current.plans[h][s];
     const ra = seg[a], rb = seg[b];
     if (ra === undefined && rb === undefined) { setPick(null); return; }
+    const where = `${tm.segLabels[s]} of the ${tm.periodName(h)}`;
     if (ra !== undefined && ra === rb) {
-      setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]) });
+      setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]), edited: true });
       setPick(null);
+      showSwapNote({
+        title: `Swapped ${a} and ${b} sides from ${where} on`,
+        lines: ["Same roles and minutes, just different spots on the field."],
+        hardCount: checkLineup(result.plans, players, cfg, rules).filter((i) => i.level === "hard").length,
+      });
       return;
     }
     const nseg = { ...seg };
@@ -416,14 +438,11 @@ export default function LineupSolver() {
     const line = (n) => (before[n].min === after[n].min
       ? `${n}: ${after[n].min} min (unchanged)`
       : `${n}: ${before[n].min} → ${after[n].min} min (${after[n].min > before[n].min ? "+" : ""}${after[n].min - before[n].min})`);
-    const where = `${tm.segLabels[s]} of the ${tm.periodName(h)}`;
-    setSwapNote({
+    showSwapNote({
       title: ra !== undefined && rb !== undefined ? `Swapped ${a} and ${b} in ${where}` : `${rb === undefined ? b : a} on for ${rb === undefined ? a : b} in ${where}`,
       lines: [line(a), line(b)],
       hardCount,
     });
-    clearTimeout(swapTimer.current);
-    swapTimer.current = setTimeout(() => setSwapNote(null), 8000);
   };
 
   // ----- boards -----
@@ -533,7 +552,7 @@ export default function LineupSolver() {
     const Tag = interactive ? "button" : "div";
     return (
       <Tag key={slot} draggable={interactive || undefined}
-        onClick={interactive ? () => (pick ? (sameSeg ? doSwap(h, s, pick.name, name) : setPick({ h, s, name })) : setPick({ h, s, name })) : undefined}
+        onClick={interactive ? () => (sameSeg ? doSwap(h, s, pick.name, name) : setPick(selected ? null : { h, s, name })) : undefined}
         onDragStart={interactive ? (e) => { setPick({ h, s, name }); e.dataTransfer.effectAllowed = "move"; } : undefined}
         onDragOver={interactive ? (e) => { if (sameSeg) e.preventDefault(); } : undefined}
         onDrop={interactive ? (e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, name); } : undefined}
@@ -588,7 +607,7 @@ export default function LineupSolver() {
             const target = pick && pick.h === h && pick.s === s && !selected;
             return (
               <button key={n} draggable
-                onClick={() => (pick ? (target ? doSwap(h, s, pick.name, n) : setPick({ h, s, name: n })) : setPick({ h, s, name: n }))}
+                onClick={() => (target ? doSwap(h, s, pick.name, n) : setPick(selected ? null : { h, s, name: n }))}
                 onDragStart={(e) => { setPick({ h, s, name: n }); e.dataTransfer.effectAllowed = "move"; }}
                 onDragOver={(e) => { if (target) e.preventDefault(); }}
                 onDrop={(e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, n); }}
@@ -636,7 +655,7 @@ export default function LineupSolver() {
     <div className="hidden print:block p-2 text-slate-900">
       <div className="flex items-baseline justify-between mb-2">
         <h1 className="text-xl font-extrabold text-emerald-950">Greyhounds lineup</h1>
-        <span className="text-xs text-slate-500">{tm.P} {tm.type} of {tm.L} min · subs at {listWithAnd(tm.subTimes)}</span>
+        <span className="text-xs text-slate-500">{tm.P} {tm.type} of {tm.L} min · {subsPhrase}</span>
       </div>
       {Array.from({ length: tm.P }, (_, h) => (
         <section key={h} className="mb-3">
@@ -703,7 +722,7 @@ export default function LineupSolver() {
           <div>
             <h1 className="text-3xl font-extrabold tracking-tight text-emerald-950">Greyhounds lineup solver</h1>
             <p className="text-slate-600 mt-1">
-              {tm.P} {tm.type} of {tm.L} minutes, {tm.T} segments, subs at {listWithAnd(tm.subTimes)} each {tm.type === "halves" ? "half" : "quarter"}. Change any setting and re-solve.
+              {tm.P} {tm.type} of {tm.L} minutes, {tm.T} segments, {subsPhrase}. Change any setting and re-solve.
             </p>
             <div className="mt-2 inline-flex rounded-lg border border-slate-300 bg-white overflow-hidden text-sm">
               {GAME_SIZES.map((n) => (
