@@ -152,6 +152,7 @@ export default function LineupSolver() {
   const [commitDate, setCommitDate] = useState(todayISO());
   const [openGame, setOpenGame] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmClear, setConfirmClear] = useState(false);
   const [pick, setPick] = useState(null); // chip selected for a position swap
   const importRef = useRef(null);
 
@@ -200,6 +201,17 @@ export default function LineupSolver() {
 
   const saveSetup = () => {
     flash(writeJSON(SETUP_KEY, { players, cfg, rules }) ? "Setup saved" : "Couldn't save on this device");
+  };
+  // Back to the defaults and forget the saved setup. History is untouched.
+  const clearSetup = () => {
+    setPlayers(DEFAULT_PLAYERS);
+    setCfg(DEFAULT_CFG);
+    setRules(DEFAULT_RULES);
+    setSol(null);
+    setPick(null);
+    setConfirmClear(false);
+    try { window.localStorage.removeItem(SETUP_KEY); } catch (e) { /* ignore */ }
+    flash("Setup cleared");
   };
   const saveHistory = (h) => {
     setHistory(h);
@@ -531,6 +543,14 @@ export default function LineupSolver() {
             <button onClick={() => window.print()} disabled={!result} className={btn}>Print</button>
             <button onClick={() => setCommitOpen(!commitOpen)} disabled={!result} className={btn}>Commit to history</button>
             <button onClick={saveSetup} className={btn}>Save setup</button>
+            {confirmClear ? (
+              <span className="flex gap-1 items-center">
+                <button onClick={clearSetup} className="px-3 py-2 rounded-lg bg-red-700 text-white font-medium hover:bg-red-800">Clear it</button>
+                <button onClick={() => setConfirmClear(false)} className={btn}>Keep</button>
+              </span>
+            ) : (
+              <button onClick={() => setConfirmClear(true)} className={btn} title="Reset players, goalies and constraints to the defaults and forget the saved setup">Clear setup</button>
+            )}
             <button onClick={() => { const s = Math.floor(Math.random() * 1e6); setSeed(s); run(s); }} disabled={solving}
               className="px-3 py-2 rounded-lg border border-emerald-900 bg-white text-emerald-900 hover:bg-emerald-50 font-medium disabled:opacity-40">Shuffle</button>
             <button onClick={() => run(seed)} disabled={solving} className={primary}>{solveLabel}</button>
