@@ -46,7 +46,7 @@ const DEFAULT_PLAYERS = [
   { name: "Adam", pref: "", never: ["D"] },
   { name: "Lev", pref: "", never: [] },
   { name: "William", pref: "", never: [] },
-].map((p) => ({ ...p, out: null }));
+].map((p) => ({ ...p, pref2: "", out: null }));
 
 const DEFAULT_RULES = [
   { id: 1, type: "between", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", lo: 1, hi: 3 },
@@ -79,7 +79,7 @@ async function solve(players, cfg, rules, seed) {
 // ---------- Persistence ----------
 function loadSetup(d) {
   const players = (d.players || DEFAULT_PLAYERS).map((p) => ({
-    name: p.name, pref: p.pref || "", never: p.never || [], out: p.out ?? null,
+    name: p.name, pref: p.pref || "", pref2: p.pref2 || "", never: p.never || [], out: p.out ?? null,
   }));
   const c = d.cfg || {};
   const cfg = {
@@ -677,24 +677,27 @@ export default function LineupSolver() {
           <div className="space-y-5">
             <section className="bg-white rounded-xl border border-slate-200 p-4">
               <h2 className="font-bold text-emerald-950 mb-1">Players</h2>
-              <p className="text-xs text-slate-500 mb-2">Pref nudges the solver toward a position; Never is a hard rule. Mark anyone absent or leaving early.</p>
+              <p className="text-xs text-slate-500 mb-2">First and second choice of position nudge the solver (second counts half); Never is a hard rule. Mark anyone absent or leaving early.</p>
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-slate-500">
-                    <th className="text-left py-1">Name</th><th>Pref</th><th>Never</th><th>Status</th>
+                    <th className="text-left py-1">Name</th><th>1st</th><th>2nd</th><th>Never</th><th>Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {players.map((p, i) => (
                     <tr key={i} className={`border-t border-slate-100 ${p.out ? "text-slate-400" : ""}`}>
                       <td className="py-1 font-medium">{p.name}</td>
-                      <td className="text-center">
-                        <select value={p.pref} onChange={(e) => setPlayer(i, { pref: e.target.value })}
-                          className="border border-slate-200 rounded px-1 bg-white">
-                          <option value="">–</option>
-                          {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-                        </select>
-                      </td>
+                      {["pref", "pref2"].map((k) => (
+                        <td key={k} className="text-center">
+                          <select value={p[k]} onChange={(e) => setPlayer(i, { [k]: e.target.value })}
+                            className="border border-slate-200 rounded px-0.5 bg-white">
+                            <option value="">–</option>
+                            {ROLES.filter((r) => !p.never.includes(r) && r !== p[k === "pref" ? "pref2" : "pref"]).map((r) => <option key={r} value={r}>{r}</option>)}
+                            {p[k] && (p.never.includes(p[k]) || p[k] === p[k === "pref" ? "pref2" : "pref"]) && <option value={p[k]}>{p[k]}</option>}
+                          </select>
+                        </td>
+                      ))}
                       <td className="text-center">
                         <div className="flex gap-0.5 justify-center">
                           {ROLES.map((r) => (

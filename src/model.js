@@ -149,7 +149,8 @@ export function buildModel(players, cfg, rules, seed) {
       if (!canPlay(n, t, r)) continue;
       bins.add(x(n, t, r));
       terms.push(x(n, t, r));
-      const w = (byName[n].pref === r ? 1 : 0) + 0.001 * rnd();
+      // First choice counts in full, second choice half.
+      const w = (byName[n].pref === r ? 1 : byName[n].pref2 === r ? 0.5 : 0) + 0.001 * rnd();
       obj.push(`${w.toFixed(4)} ${x(n, t, r)}`);
     }
     if (terms.length === 0) return { reason: `${n} has every position marked Never.` };
@@ -250,7 +251,8 @@ export function buildModel(players, cfg, rules, seed) {
         const v = columns[x(n, t, r)];
         if (v && v.Primal > 0.5) {
           seg[n] = r;
-          if (byName[n].pref === r) score++;
+          if (byName[n].pref === r) score += 1;
+          else if (byName[n].pref2 === r) score += 0.5;
         }
       }
       plans[Math.floor(t / SEGS)].push(seg);
