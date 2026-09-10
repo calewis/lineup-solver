@@ -1,0 +1,51 @@
+// node scripts/bench.mjs — solve a few setups and report timing and fairness.
+import highsLoader from "highs";
+import { buildModel, timingOf } from "../src/model.js";
+const roster = [
+  ["Michael", "", ["D"]], ["Ethan", "", ["D", "F"]], ["Drew", "F", []], ["Isaac", "F", []],
+  ["Khalid", "D", []], ["Theodore", "D", ["F"]], ["Ryan", "D", []], ["Neil", "D", []],
+  ["Bobby", "M", []], ["Piers", "M", []], ["Arran", "F", []], ["Adam", "", ["D"]],
+  ["Lev", "", []], ["William", "", []],
+].map(([name, pref, never]) => ({ name, pref, never, out: null }));
+const RULES = [
+  { id: 1, type: "between", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", lo: 1, hi: 3 },
+];
+const cfg = { gks: ["Ethan", "Michael"], size: 9, formation: { D: 3, M: 3, F: 2 }, periodType: "halves", periodMin: 25, segsPerPeriod: 4 };
+const cfgQ = { ...cfg, periodType: "quarters", periodMin: 12, segsPerPeriod: 2, gks: ["Ethan", "Ethan", "Michael", "Michael"] };
+const cfgQ4 = { ...cfgQ, gks: ["Ethan", "Michael", "Drew", "Isaac"] };
+const cfg7 = { ...cfg, size: 7, formation: { D: 3, M: 2, F: 1 } };
+const cfg11 = { ...cfg, size: 11, formation: { D: 4, M: 4, F: 2 } };
+const withOut = (edits) => roster.map((p) => ({ ...p, out: edits[p.name] ?? null }));
+const cases = [
+  ["full roster", roster, cfg],
+  ["quarters 12x2, 14 players", roster, cfgQ],
+  ["quarters, 4 different goalies", roster, cfgQ4],
+  ["7v7 3-2-1, 10 players", roster.slice(0, 10), cfg7],
+  ["11v11 4-4-2, 14 players", roster, cfg11],
+  ["11v11 4-4-2, 12 players", roster.slice(0, 12), cfg11],
+  ["only 9 players, no rules", withOut({ Bobby: "absent", Piers: "absent", Lev: "absent", Adam: "absent", William: "absent" }), cfg, []],
+  ["Bobby absent", withOut({ Bobby: "absent" }), cfg],
+  ["Bobby + Piers absent", withOut({ Bobby: "absent", Piers: "absent" }), cfg],
+  ["Drew leaves at halftime", withOut({ Drew: 4 }), cfg],
+  ["Neil absent, Lev leaves 12:00 H2", withOut({ Neil: "absent", Lev: 6 }), cfg],
+  ["goalie absent", withOut({ Michael: "absent" }), cfg],
+  ["only 9 players", withOut({ Bobby: "absent", Piers: "absent", Lev: "absent", Adam: "absent", William: "absent" }), cfg],
+];
+const highs = await highsLoader();
+for (const [label, players, c, rules = RULES] of cases) {
+  const m = buildModel(players, c, rules, 7);
+  if (m.reason) { console.log(`${label}: ${m.reason}`); continue; }
+  const t0 = performance.now();
+  const res = highs.solve(m.lp);
+  const ms = (performance.now() - t0).toFixed(0);
+  if (res.Status !== "Optimal") { console.log(`${label}: ${res.Status} (${ms}ms)`); continue; }
+  const { plans, score } = m.decode(res.Columns);
+  const segs = {};
+  let possible = 0;
+  for (const p of players) { segs[p.name] = 0; }
+  const { S, T, gks } = timingOf(c);
+  for (let t = 0; t < T; t++) for (const [n, r] of Object.entries(plans[Math.floor(t / S)][t % S])) { segs[n]++; }
+  for (const p of players) if (p.pref && !gks.includes(p.name)) possible += segs[p.name];
+  const line = players.map((p) => `${p.name.slice(0, 3)}${segs[p.name]}`).join(" ");
+  console.log(`${label}: ${ms}ms, prefs ${score}/${possible}, segs: ${line}`);
+}
