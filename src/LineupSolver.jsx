@@ -1,10 +1,10 @@
 import { useState, useEffect, useMemo } from "react";
+import highsLoader from "highs";
+import highsWasmUrl from "highs/runtime?url";
+import { SEGS, SEG_LEN, ROLES, buildModel } from "./model.js";
 
 // ---------- Constants ----------
-const SEGS = 4; // per half
-const SEG_LEN = [6, 6, 6, 7]; // minutes; subs at 6:00, 12:00, 18:00 of a 25-min half
 const SEG_LABEL = ["0–6", "6–12", "12–18", "18–25"];
-const ROLES = ["D", "M", "F"];
 const ROLE_NAME = { D: "Defense", M: "Mid", F: "Forward", GK: "In goal", B: "Bench" };
 const ROLE_PHRASE = { any: "on the field", D: "in defense", M: "in midfield", F: "at forward" };
 const RULE_TEMPLATES = [
@@ -52,171 +52,23 @@ const DEFAULT_CFG = {
 };
 
 // ---------- Solver ----------
-function shuffle(a, rnd) {
-  const b = a.slice();
-  for (let i = b.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [b[i], b[j]] = [b[j], b[i]];
-  }
-  return b;
-}
-function mulberry32(seed) {
-  return function () {
-    let t = (seed += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+// HiGHS (mixed-integer programming) compiled to WebAssembly. Loaded once.
+let highsPromise = null;
+function getHighs() {
+  if (!highsPromise) highsPromise = highsLoader({ locateFile: () => highsWasmUrl });
+  return highsPromise;
 }
 
-// Phase A: decide which segments each player is on the field, per half.
-function solvePatterns(names, gk1, gk2, gSegs, rnd) {
-  const outfield = names.filter((n) => n !== gk1 && n !== gk2);
-  for (let attempt = 0; attempt < 400; attempt++) {
-    // split outfielders: which 6 get 3 segments in H1 (the rest get 3 in H2)
-    const sh = shuffle(outfield, rnd);
-    const h1three = new Set(sh.slice(0, 6));
-    const halves = [];
-    let ok = true;
-    for (let h = 0; h < 2 && ok; h++) {
-      const offG = h === 0 ? gk2 : gk1; // the goalie not in net this half
-      const parts = outfield.map((n) => ({
-        n,
-        want: (h === 0 ? h1three.has(n) : !h1three.has(n)) ? 3 : 2,
-        noDoubleSit: true,
-      }));
-      parts.push({ n: offG, want: gSegs, noDoubleSit: gSegs >= 2 });
-      const masks = assignMasks(parts, rnd);
-      if (!masks) { ok = false; break; }
-      halves.push(masks);
-    }
-    if (!ok) continue;
-    // cross-halftime: no outfielder sits last seg of H1 and first seg of H2
-    let cross = true;
-    for (const n of outfield) {
-      const sitsEnd = !(halves[0][n] & (1 << (SEGS - 1)));
-      const sitsStart = !(halves[1][n] & 1);
-      if (sitsEnd && sitsStart) { cross = false; break; }
-    }
-    if (!cross) continue;
-    return halves;
-  }
-  return null;
+// Returns { plans, score } or null when no lineup satisfies the constraints.
+async function solve(players, cfg, rules, seed) {
+  const highs = await getHighs();
+  const { lp, decode } = buildModel(players, cfg, rules, seed);
+  const res = highs.solve(lp);
+  if (res.Status !== "Optimal") return null;
+  return decode(res.Columns);
 }
 
-function assignMasks(parts, rnd) {
-  // randomized backtracking: per-segment capacity is 8 field spots
-  const cap = Array(SEGS).fill(8);
-  const order = shuffle(parts, rnd);
-  const out = {};
-  function masksFor(want, noDS) {
-    const res = [];
-    for (let m = 1; m < 1 << SEGS; m++) {
-      let bits = 0;
-      for (let s = 0; s < SEGS; s++) if (m & (1 << s)) bits++;
-      if (bits !== want) continue;
-      if (noDS) {
-        let bad = false;
-        for (let s = 0; s < SEGS - 1; s++)
-          if (!(m & (1 << s)) && !(m & (1 << (s + 1)))) bad = true;
-        if (bad) continue;
-      }
-      res.push(m);
-    }
-    return res;
-  }
-  function rec(i) {
-    if (i === order.length) return cap.every((c) => c === 0);
-    const p = order[i];
-    const opts = shuffle(masksFor(p.want, p.noDoubleSit), rnd);
-    for (const m of opts) {
-      let fits = true;
-      for (let s = 0; s < SEGS; s++) if (m & (1 << s) && cap[s] <= 0) fits = false;
-      if (!fits) continue;
-      for (let s = 0; s < SEGS; s++) if (m & (1 << s)) cap[s]--;
-      out[p.n] = m;
-      if (rec(i + 1)) return true;
-      for (let s = 0; s < SEGS; s++) if (m & (1 << s)) cap[s]++;
-      delete out[p.n];
-    }
-    return false;
-  }
-  return rec(0) ? out : null;
-}
-
-// Phase B: assign roles segment by segment. Returns {plan, score} or null.
-function solveRoles(players, masks, gk, offG, cfg, rules, rnd) {
-  const byName = Object.fromEntries(players.map((p) => [p.name, p]));
-  const plan = []; // plan[s] = { name: role }
-  for (let s = 0; s < SEGS; s++) {
-    const on = Object.keys(masks).filter((n) => masks[n] & (1 << s));
-    const carried = {};
-    const free = [];
-    for (const n of on) {
-      if (s > 0 && masks[n] & (1 << (s - 1))) carried[n] = plan[s - 1][n];
-      else free.push(n);
-    }
-    const need = { D: 3, M: 3, F: 2 };
-    for (const n of Object.keys(carried)) need[carried[n]]--;
-    if (Object.values(need).some((v) => v < 0)) return null;
-    const slots = [];
-    for (const r of ROLES) for (let k = 0; k < need[r]; k++) slots.push(r);
-
-    let seg = null;
-    for (let t = 0; t < 60 && !seg; t++) {
-      const perm = shuffle(slots, rnd);
-      const fr = shuffle(free, rnd);
-      const asg = { ...carried };
-      let ok = true;
-      for (let i = 0; i < fr.length; i++) {
-        const n = fr[i], r = perm[i];
-        const p = byName[n];
-        if ((p.never || []).includes(r)) { ok = false; break; }
-        asg[n] = r;
-      }
-      if (ok && checkSegment(asg, rules)) seg = asg;
-    }
-    if (!seg) return null;
-    plan.push(seg);
-  }
-  // score: preference matches
-  let score = 0;
-  for (let s = 0; s < SEGS; s++)
-    for (const [n, r] of Object.entries(plan[s]))
-      if (byName[n] && byName[n].pref === r) score += 1;
-  return { plan, score };
-}
-
-function checkSegment(asg, rules) {
-  for (const rule of rules) {
-    const count = rule.players.filter(
-      (p) => p in asg && (rule.role === "any" || asg[p] === rule.role)
-    ).length;
-    if (rule.type === "atMost" && count > rule.n) return false;
-    if (rule.type === "atLeast" && count < rule.n) return false;
-    if (rule.type === "notBoth" && count >= 2) return false;
-  }
-  return true;
-}
-
-function solve(players, cfg, rules, seed) {
-  const rnd = mulberry32(seed);
-  const names = players.map((p) => p.name);
-  let best = null;
-  for (let outer = 0; outer < 40; outer++) {
-    const halves = solvePatterns(names, cfg.gk1, cfg.gk2, cfg.goalieFieldSegs, rnd);
-    if (!halves) continue;
-    const r1 = solveRoles(players, halves[0], cfg.gk1, cfg.gk2, cfg, rules, rnd);
-    const r2 = solveRoles(players, halves[1], cfg.gk2, cfg.gk1, cfg, rules, rnd);
-    if (!r1 || !r2) continue;
-    const sol = { halves, plans: [r1.plan, r2.plan], score: r1.score + r2.score };
-    if (!best || sol.score > best.score) best = sol;
-    if (best && outer > 12) break; // good enough
-  }
-  return best;
-}
-
-// Load a saved setup, keeping only the fields this version understands.
+// ---------- Setup persistence ----------
 function loadSetup(d) {
   const players = (d.players || DEFAULT_PLAYERS).map((p) => ({
     name: p.name, pref: p.pref || "", never: p.never || [],
@@ -260,13 +112,21 @@ export default function LineupSolver() {
   const [tab, setTab] = useState(0);
   const [savedNote, setSavedNote] = useState("");
   const [picker, setPicker] = useState(false);
+  const [solving, setSolving] = useState(false);
 
   // A solution remembers the exact inputs it was built from. If any of them
   // change, the solution is stale and disappears until the coach re-solves.
-  const solveWith = (p, c, r, s) => {
-    const result = solve(p, c, r, s);
+  const solveWith = async (p, c, r, s) => {
+    setSolving(true);
+    let result = null;
+    try {
+      result = await solve(p, c, r, s);
+    } catch (e) {
+      console.error("solver failed", e);
+    }
     setSol({ result, players: p, cfg: c, rules: r });
     setFailed(!result);
+    setSolving(false);
   };
   const run = (s = seed) => solveWith(players, cfg, rules, s);
   const stale = !!sol && (sol.players !== players || sol.cfg !== cfg || sol.rules !== rules);
@@ -417,9 +277,10 @@ export default function LineupSolver() {
             <button onClick={() => window.print()} disabled={!result}
               className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 font-medium disabled:opacity-40 disabled:hover:bg-white">Print</button>
             <button onClick={saveSetup} className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 font-medium">Save setup</button>
-            <button onClick={() => { const s = Math.floor(Math.random() * 1e6); setSeed(s); run(s); }}
-              className="px-3 py-2 rounded-lg border border-emerald-900 bg-white text-emerald-900 hover:bg-emerald-50 font-medium">Shuffle</button>
-            <button onClick={() => run(seed)} className="px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800">Solve</button>
+            <button onClick={() => { const s = Math.floor(Math.random() * 1e6); setSeed(s); run(s); }} disabled={solving}
+              className="px-3 py-2 rounded-lg border border-emerald-900 bg-white text-emerald-900 hover:bg-emerald-50 font-medium disabled:opacity-40">Shuffle</button>
+            <button onClick={() => run(seed)} disabled={solving}
+              className="px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800 disabled:opacity-60">{solving ? "Solving…" : "Solve"}</button>
           </div>
         </header>
 
@@ -432,8 +293,12 @@ export default function LineupSolver() {
                   <p className="font-semibold">Setup changed.</p>
                   <p className="text-sm mt-1">The previous lineup no longer matches your constraints. Solve again to build a new one.</p>
                 </div>
-                <button onClick={() => run(seed)} className="px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800">Solve</button>
+                <button onClick={() => run(seed)} disabled={solving}
+                  className="px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800 disabled:opacity-60">{solving ? "Solving…" : "Solve"}</button>
               </div>
+            )}
+            {solving && !sol && (
+              <p className="text-slate-500">Solving…</p>
             )}
             {failed && !stale && (
               <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-amber-900">
@@ -485,7 +350,7 @@ export default function LineupSolver() {
                   )}
                 </div>
                 <p className="text-xs text-slate-500">
-                  Built in: everyone plays 5 of 8 segments, goalies get a full half in net plus their field segments, nobody sits twice in a row (including across halftime), and players keep their position while they stay on the field. Shuffle explores different valid schedules under the same constraints.
+                  Built in: everyone plays at least 5 of 8 segments, goalies get a full half in net plus their field segments, nobody sits twice in a row (including across halftime), and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
                 </p>
               </>
             )}
@@ -566,7 +431,7 @@ export default function LineupSolver() {
                   <select value={cfg.goalieFieldSegs} onChange={(e) => setCfg({ ...cfg, goalieFieldSegs: +e.target.value })}
                     className="border border-slate-300 rounded-md px-2 py-1 bg-white">
                     <option value={2}>2 (premium, ~37 min)</option>
-                    <option value={1}>1 (~31 min, even)</option>
+                    <option value={1}>1 (~31 min, two others get a sixth segment)</option>
                   </select>
                 </label>
               </div>
