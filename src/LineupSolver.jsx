@@ -318,7 +318,7 @@ export default function LineupSolver() {
 
   // ----- boards -----
   // snap = { plans, cfg, players } so history entries render the same way.
-  const halfBoard = (h, snap, compact = false) => {
+  const halfBoard = (h, snap, compact = false, interactive = false) => {
     const gk = h === 0 ? snap.cfg.gk1 : snap.cfg.gk2;
     const grid = [];
     let anyOut = false;
@@ -354,9 +354,22 @@ export default function LineupSolver() {
                 {grid.map((col, s) => (
                   <td key={s} className={`${compact ? "p-1" : "p-1.5"} border-l border-slate-200`}>
                     <div className={`flex flex-col ${compact ? "gap-0.5" : "gap-1"}`}>
-                      {col[row].sort().map((n) => (
-                        <span key={n} className={`px-2 ${compact ? "py-px" : "py-0.5"} rounded-md border text-center ${TINT[row]}`}>{n}</span>
-                      ))}
+                      {col[row].sort().map((n) => {
+                        const canEdit = interactive && row !== "GK" && row !== "O";
+                        const selected = pick && pick.h === h && pick.s === s && pick.name === n;
+                        const target = canEdit && pick && pick.h === h && pick.s === s && !selected;
+                        const cls = `px-2 ${compact ? "py-px" : "py-0.5"} rounded-md border text-center ${TINT[row]} ${selected ? "ring-2 ring-amber-400" : target ? "ring-2 ring-emerald-500" : ""}`;
+                        if (!canEdit) return <span key={n} className={cls}>{n}</span>;
+                        return (
+                          <button key={n} draggable
+                            onClick={() => (target ? doSwap(h, s, pick.name, n) : setPick(selected ? null : { h, s, name: n }))}
+                            onDragStart={(e) => { setPick({ h, s, name: n }); e.dataTransfer.effectAllowed = "move"; }}
+                            onDragOver={(e) => { if (target) e.preventDefault(); }}
+                            onDrop={(e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, n); }}
+                            title="Tap or drag onto another name in this column to swap them"
+                            className={`${cls} cursor-grab active:cursor-grabbing w-full`}>{n}</button>
+                        );
+                      })}
                     </div>
                   </td>
                 ))}
@@ -377,6 +390,7 @@ export default function LineupSolver() {
     if (!slots || a === b) return;
     const seg = current.plans[h][s];
     const ra = seg[a], rb = seg[b];
+    if (ra === undefined && rb === undefined) { setPick(null); return; }
     if (ra !== undefined && ra === rb) {
       setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]) });
       setPick(null);
@@ -407,41 +421,41 @@ export default function LineupSolver() {
     swapTimer.current = setTimeout(() => setSwapNote(null), 8000);
   };
   // Substitution markers for one segment: who comes off at the end of it and
-  // who is arriving at the start of it. Within a half a newcomer takes the
-  // exact spot the outgoing player vacated, so the pairing is by named spot.
+  // who comes on in their place. Off and on are set differences between this
+  // segment and the next; pairs are matched by named spot first, then by
+  // role, then whatever is left, so hand edits never leave a dangling marker.
   const subsFor = (h, s, snap) => {
     const seg = snap.plans[h][s];
     const sl = (snap.slots && snap.slots[h][s]) || {};
     const t = h * SEGS + s;
-    const at = (tt) => (tt < 0 || tt >= 2 * SEGS ? null : snap.plans[Math.floor(tt / SEGS)][tt % SEGS]);
-    const slotsAt = (tt) => (snap.slots && tt >= 0 && tt < 2 * SEGS ? snap.slots[Math.floor(tt / SEGS)][tt % SEGS] : {});
-    const next = at(t + 1), prev = at(t - 1);
-    const off = {}, on = {}, comingOn = [];
-    if (next) {
-      const nsl = slotsAt(t + 1);
-      for (const n of Object.keys(seg)) {
-        if (next[n] !== undefined) continue;
-        const sameHalf = s < SEGS - 1;
-        const replacement = sameHalf ? Object.keys(nsl).find((m) => nsl[m] === sl[n] && seg[m] === undefined) : null;
-        off[n] = replacement || true;
+    const off = {}, moves = {};
+    let comingOn = [];
+    if (t + 1 < 2 * SEGS) {
+      const next = snap.plans[Math.floor((t + 1) / SEGS)][(t + 1) % SEGS];
+      const nsl = (snap.slots && snap.slots[Math.floor((t + 1) / SEGS)][(t + 1) % SEGS]) || {};
+      const offList = Object.keys(seg).filter((n) => next[n] === undefined);
+      comingOn = Object.keys(next).filter((n) => seg[n] === undefined).sort();
+      const unpaired = new Set(comingOn);
+      const take = (n, m) => { off[n] = m; unpaired.delete(m); };
+      for (const n of offList) { const m = [...unpaired].find((m) => nsl[m] === sl[n]); if (m) take(n, m); }
+      for (const n of offList) if (!off[n]) { const m = [...unpaired].find((m) => next[m] === seg[n]); if (m) take(n, m); }
+      for (const n of offList) if (!off[n]) { const m = [...unpaired][0]; if (m) take(n, m); else off[n] = true; }
+      if (s < SEGS - 1) for (const n of Object.keys(seg)) {
+        if (next[n] !== undefined && nsl[n] !== sl[n]) moves[n] = nsl[n];
       }
-      for (const n of Object.keys(next)) if (seg[n] === undefined) comingOn.push(n);
     }
-    if (prev) for (const n of Object.keys(seg)) if (prev[n] === undefined) on[n] = true;
-    return { off, on, comingOn };
+    return { off, comingOn, moves };
   };
   const chip = (name, slot, h, s, interactive, compact, sub = {}) => {
     const selected = pick && pick.h === h && pick.s === s && pick.name === name;
     const sameRow = pick && pick.h === h && pick.s === s && !selected;
     const size = compact ? "text-[9px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]";
     const off = sub.off && sub.off[name];
-    const on = sub.on && sub.on[name];
-    // Off: amber on screen, dashed black border in print. On: lime on screen, solid black border in print.
+    const move = sub.moves && sub.moves[name];
+    // Off: amber on screen, dashed black border in print.
     const tone = off
       ? "bg-amber-200 border-2 border-amber-500 print:bg-white print:border-dashed print:border-black"
-      : on
-        ? "bg-lime-200 border-2 border-lime-500 print:bg-white print:border-black"
-        : "bg-white border-2 border-transparent";
+      : "bg-white border-2 border-transparent";
     const Tag = interactive ? "button" : "div";
     return (
       <Tag key={slot} draggable={interactive || undefined}
@@ -454,7 +468,7 @@ export default function LineupSolver() {
         <span className="block font-semibold">{name}</span>
         <span className="block text-slate-500">{slot}</span>
         {off && <span className="block font-semibold text-amber-900 print:text-black">▼ off{off !== true ? ` · ${off} on` : ""}</span>}
-        {on && !off && <span className="block font-semibold text-lime-900 print:text-black">▲ on</span>}
+        {move && !off && <span className="block text-slate-500">→ {move} next</span>}
       </Tag>
     );
   };
@@ -558,7 +572,7 @@ export default function LineupSolver() {
       )}
       <section className="break-before-page">
         <h2 className="text-sm font-bold text-emerald-950 mb-1">Field positions by segment</h2>
-        <p className="text-[10px] text-slate-600 mb-2">Dashed box ▼ = comes off at the end of this segment, with who takes their spot. Solid box ▲ = just came on. Underlined ▲ on the bench = coming on next.</p>
+        <p className="text-[10px] text-slate-600 mb-2">Dashed box ▼ = comes off at the end of this segment, with who comes on for them. Underlined ▲ on the bench = coming on next.</p>
         <div className="grid grid-cols-2 gap-2">
           {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
             <div key={`${h}-${s}`}>{fieldView(h, s, current, false, true)}</div>
@@ -709,16 +723,16 @@ export default function LineupSolver() {
                       {tab < 2 && (
                         <>
                           <p className="text-sm text-slate-500 mb-3">
-                            {tab === 0 ? cfg.gk1 : cfg.gk2} is in goal. Reading down a column shows the whole field for that stretch; every change between columns is a straight bench swap.
+                            {tab === 0 ? cfg.gk1 : cfg.gk2} is in goal. Reading down a column shows the whole field for that stretch. Tap a name, then another name in the same column (bench included), to swap them for that segment; the hard rules are re-checked and the Field tab follows.
                           </p>
-                          {halfBoard(tab, current)}
+                          {halfBoard(tab, current, false, true)}
                         </>
                       )}
                       {tab === 2 && (
                         <>
                           <p className="text-sm text-slate-500 mb-3">
                             Tap a player, then any other player in that segment, to swap them. Same-row swaps just change sides and carry forward through the half. Swapping across rows or with the bench changes that segment only, and the hard rules are re-checked below. No re-solve needed.
-                            <span className="block mt-1"><span className="inline-block w-3 h-3 rounded-sm bg-amber-200 border border-amber-500 align-middle mr-1" />▼ comes off at the end of this segment, with who takes their spot. <span className="inline-block w-3 h-3 rounded-sm bg-lime-200 border border-lime-500 align-middle mx-1" />▲ just came on.</span>
+                            <span className="block mt-1"><span className="inline-block w-3 h-3 rounded-sm bg-amber-200 border border-amber-500 align-middle mr-1" />▼ comes off at the end of this segment, with who comes on for them. On the bench, ▲ marks who is coming on next.</span>
                           </p>
                           <div className="grid sm:grid-cols-2 gap-3">
                             {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
