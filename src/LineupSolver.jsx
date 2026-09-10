@@ -354,10 +354,42 @@ export default function LineupSolver() {
     setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]) });
     setPick(null);
   };
-  const chip = (name, slot, h, s, interactive, compact) => {
+  // Substitution markers for one segment: who comes off at the end of it and
+  // who is arriving at the start of it. Within a half a newcomer takes the
+  // exact spot the outgoing player vacated, so the pairing is by named spot.
+  const subsFor = (h, s, snap) => {
+    const seg = snap.plans[h][s];
+    const sl = (snap.slots && snap.slots[h][s]) || {};
+    const t = h * SEGS + s;
+    const at = (tt) => (tt < 0 || tt >= 2 * SEGS ? null : snap.plans[Math.floor(tt / SEGS)][tt % SEGS]);
+    const slotsAt = (tt) => (snap.slots && tt >= 0 && tt < 2 * SEGS ? snap.slots[Math.floor(tt / SEGS)][tt % SEGS] : {});
+    const next = at(t + 1), prev = at(t - 1);
+    const off = {}, on = {}, comingOn = [];
+    if (next) {
+      const nsl = slotsAt(t + 1);
+      for (const n of Object.keys(seg)) {
+        if (next[n] !== undefined) continue;
+        const sameHalf = s < SEGS - 1;
+        const replacement = sameHalf ? Object.keys(nsl).find((m) => nsl[m] === sl[n] && seg[m] === undefined) : null;
+        off[n] = replacement || true;
+      }
+      for (const n of Object.keys(next)) if (seg[n] === undefined) comingOn.push(n);
+    }
+    if (prev) for (const n of Object.keys(seg)) if (prev[n] === undefined) on[n] = true;
+    return { off, on, comingOn };
+  };
+  const chip = (name, slot, h, s, interactive, compact, sub = {}) => {
     const selected = pick && pick.h === h && pick.s === s && pick.name === name;
     const sameRow = pick && pick.h === h && pick.s === s && current.plans[h][s][pick.name] === current.plans[h][s][name];
     const size = compact ? "text-[9px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]";
+    const off = sub.off && sub.off[name];
+    const on = sub.on && sub.on[name];
+    // Off: amber on screen, dashed black border in print. On: lime on screen, solid black border in print.
+    const tone = off
+      ? "bg-amber-200 border-2 border-amber-500 print:bg-white print:border-dashed print:border-black"
+      : on
+        ? "bg-lime-200 border-2 border-lime-500 print:bg-white print:border-black"
+        : "bg-white border-2 border-transparent";
     const Tag = interactive ? "button" : "div";
     return (
       <Tag key={slot} draggable={interactive || undefined}
@@ -366,9 +398,11 @@ export default function LineupSolver() {
         onDragOver={interactive ? (e) => { if (sameRow) e.preventDefault(); } : undefined}
         onDrop={interactive ? (e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, name); } : undefined}
         title={interactive ? `${SLOT_NAME[slot]} — tap or drag onto a teammate in the same row to swap` : SLOT_NAME[slot]}
-        className={`rounded-md bg-white text-slate-900 text-center leading-tight shadow-sm ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameRow && interactive ? "ring-2 ring-white/70" : ""}`}>
+        className={`rounded-md text-slate-900 text-center leading-tight shadow-sm ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameRow && interactive ? "ring-2 ring-white/70" : ""}`}>
         <span className="block font-semibold">{name}</span>
         <span className="block text-slate-500">{slot}</span>
+        {off && <span className="block font-semibold text-amber-900 print:text-black">▼ off{off !== true ? ` · ${off} on` : ""}</span>}
+        {on && !off && <span className="block font-semibold text-lime-900 print:text-black">▲ on</span>}
       </Tag>
     );
   };
@@ -377,12 +411,13 @@ export default function LineupSolver() {
     const sl = (snap.slots && snap.slots[h][s]) || {};
     const gk = h === 0 ? snap.cfg.gk1 : snap.cfg.gk2;
     const t = h * SEGS + s;
+    const sub = subsFor(h, s, snap);
     const bench = snap.players
       .filter((p) => seg[p.name] === undefined && p.name !== gk && available(p, t))
       .map((p) => p.name).sort();
     const row = (r) => SLOTS[r].map((slot) => {
       const name = Object.keys(sl).find((n) => sl[n] === slot);
-      return name ? chip(name, slot, h, s, interactive, compact) : <div key={slot} className="min-w-[3rem]" />;
+      return name ? chip(name, slot, h, s, interactive, compact, sub) : <div key={slot} className="min-w-[3rem]" />;
     });
     return (
       <div className={`rounded-xl bg-emerald-700 text-white ${compact ? "p-1.5" : "p-2.5"}`}>
@@ -401,7 +436,11 @@ export default function LineupSolver() {
             </div>
           </div>
         </div>
-        <div className={`${compact ? "text-[9px] mt-1" : "text-[11px] mt-1.5"} opacity-90`}>Bench: {bench.join(", ") || "—"}</div>
+        <div className={`${compact ? "text-[9px] mt-1" : "text-[11px] mt-1.5"} opacity-90`}>
+          Bench: {bench.length === 0 ? "—" : bench.map((n, i) => (
+            <span key={n}>{i > 0 && ", "}{sub.comingOn.includes(n) ? <span className="font-bold underline">▲ {n}</span> : n}</span>
+          ))}
+        </div>
       </div>
     );
   };
@@ -452,7 +491,8 @@ export default function LineupSolver() {
         </p>
       )}
       <section className="break-before-page">
-        <h2 className="text-sm font-bold text-emerald-950 mb-2">Field positions by segment</h2>
+        <h2 className="text-sm font-bold text-emerald-950 mb-1">Field positions by segment</h2>
+        <p className="text-[10px] text-slate-600 mb-2">Dashed box ▼ = comes off at the end of this segment, with who takes their spot. Solid box ▲ = just came on. Underlined ▲ on the bench = coming on next.</p>
         <div className="grid grid-cols-2 gap-2">
           {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
             <div key={`${h}-${s}`}>{fieldView(h, s, current, false, true)}</div>
@@ -566,6 +606,7 @@ export default function LineupSolver() {
                         <>
                           <p className="text-sm text-slate-500 mb-3">
                             Positions within a line are assigned at random. Tap a player, then a teammate in the same row, to swap them; the swap carries forward through the rest of that half. No re-solve needed.
+                            <span className="block mt-1"><span className="inline-block w-3 h-3 rounded-sm bg-amber-200 border border-amber-500 align-middle mr-1" />▼ comes off at the end of this segment, with who takes their spot. <span className="inline-block w-3 h-3 rounded-sm bg-lime-200 border border-lime-500 align-middle mx-1" />▲ just came on.</span>
                           </p>
                           <div className="grid sm:grid-cols-2 gap-3">
                             {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
