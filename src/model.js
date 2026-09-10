@@ -131,19 +131,15 @@ export function swapSlots(slots, h, s, slotA, slotB) {
   }));
 }
 
-export function buildModel(players, cfg, rules, seed) {
-  const rnd = mulberry32(seed);
-  const NEED = cfg.formation;
-  const FIELD = outfieldCount(NEED);
-  if (FIELD !== cfg.size - 1) return { reason: `The formation adds up to ${FIELD} but ${cfg.size}v${cfg.size} needs ${cfg.size - 1} on the field plus a goalie.` };
-  const names = players.map((p) => p.name);
-  if (names.length === 0) return { reason: "Add your players first." };
-  if (names.some((n) => !n.trim())) return { reason: "Every player needs a name." };
-  if (new Set(names).size !== names.length) return { reason: "Two players have the same name." };
-  const tm = timingOf(cfg);
+// Playing-time targets. Field slots left after the goalies' field segments
+// are shared among outfielders in proportion to how much of the game each
+// one is here for; everyone lands within one segment of their share.
+// Shared by buildModel and checkLineup so hand edits are judged by the same
+// rules the solver used. Returns { reason } when the setup is impossible.
+function playingTargets(players, cfg, tm) {
+  const FIELD = outfieldCount(cfg.formation);
   const { P, S, T, gks, gkOf } = tm;
-  if (gks.some((g) => !g)) return { reason: `Pick a goalie for each ${tm.type === "halves" ? "half" : "quarter"}.` };
-  const idx = Object.fromEntries(names.map((n, i) => [n, i]));
+  const names = players.map((p) => p.name);
   const byName = Object.fromEntries(players.map((p) => [p.name, p]));
   const goalies = [...new Set(gks)];
   const isGoalie = (n) => goalies.includes(n);
@@ -162,9 +158,6 @@ export function buildModel(players, cfg, rules, seed) {
   const onField = (n, t) => !inNet(n, t) && available(byName[n], t);
   const canPlay = (n, t, r) => onField(n, t) && !(byName[n].never || []).includes(r);
 
-  // Playing-time targets. Field slots left after the goalies' field segments
-  // are shared among outfielders in proportion to how much of the game each
-  // one is here for; everyone lands within one segment of their share.
   const target = {};
   const avail = {};
   for (const n of names) {
@@ -207,6 +200,26 @@ export function buildModel(players, cfg, rules, seed) {
   for (let t = 0; t < T; t++) {
     if (names.filter((n) => onField(n, t)).length < FIELD) return { reason: "Not enough players to fill the field for every segment." };
   }
+  return { isGoalie, onField, canPlay, avail, target };
+}
+
+export function buildModel(players, cfg, rules, seed) {
+  const rnd = mulberry32(seed);
+  const NEED = cfg.formation;
+  const FIELD = outfieldCount(NEED);
+  if (FIELD !== cfg.size - 1) return { reason: `The formation adds up to ${FIELD} but ${cfg.size}v${cfg.size} needs ${cfg.size - 1} on the field plus a goalie.` };
+  const names = players.map((p) => p.name);
+  if (names.length === 0) return { reason: "Add your players first." };
+  if (names.some((n) => !n.trim())) return { reason: "Every player needs a name." };
+  if (new Set(names).size !== names.length) return { reason: "Two players have the same name." };
+  const tm = timingOf(cfg);
+  const { P, S, T, gks, gkOf } = tm;
+  if (gks.some((g) => !g)) return { reason: `Pick a goalie for each ${tm.type === "halves" ? "half" : "quarter"}.` };
+  const idx = Object.fromEntries(names.map((n, i) => [n, i]));
+  const byName = Object.fromEntries(players.map((p) => [p.name, p]));
+  const share = playingTargets(players, cfg, tm);
+  if (share.reason) return { reason: share.reason };
+  const { isGoalie, onField, canPlay, target } = share;
 
   const cons = [];
   const obj = [];
@@ -347,7 +360,9 @@ const ROLE_WORD = { D: "defense", M: "midfield", F: "forward", any: "the field" 
 // may choose to override.
 export function checkLineup(plans, players, cfg, rules) {
   const NEED = cfg.formation;
-  const { S, T, gkOf, segLabel, gks } = timingOf(cfg);
+  const tm = timingOf(cfg);
+  const { P, S, T, gkOf, segLabel, gks } = tm;
+  const share = playingTargets(players, cfg, tm);
   const issues = [];
   const hard = (text) => issues.push({ level: "hard", text });
   const note = (text) => issues.push({ level: "note", text });
@@ -379,12 +394,26 @@ export function checkLineup(plans, players, cfg, rules) {
   // Sitting twice in a row, and position changes during a stint.
   for (const p of players) {
     const n = p.name;
+    // The solver only forbids back-to-back sits for players whose share is
+    // big enough to make that possible (see buildModel).
+    const noDoubleSit = share.reason || !share.target[n] || share.target[n].hi >= Math.floor(share.avail[n] / 2);
     for (let t = 0; t < T - 1; t++) {
       const here = available(p, t) && n !== gkOf(t);
       const next = available(p, t + 1) && n !== gkOf(t + 1);
-      if (here && next && !(n in segAt(t)) && !(n in segAt(t + 1))) hard(`${n} sits out ${segLabel(t)} and ${segLabel(t + 1)} back to back.`);
+      if (noDoubleSit && here && next && !(n in segAt(t)) && !(n in segAt(t + 1))) hard(`${n} sits out ${segLabel(t)} and ${segLabel(t + 1)} back to back.`);
       if ((t + 1) % S !== 0 && n in segAt(t) && n in segAt(t + 1) && segAt(t)[n] !== segAt(t + 1)[n]) {
         note(`${n} moves from ${ROLE_WORD[segAt(t)[n]]} to ${ROLE_WORD[segAt(t + 1)[n]]} without leaving the field (${segLabel(t + 1)}).`);
+      }
+    }
+    // Outfielders here for the whole game split their time evenly across periods.
+    if (!share.reason && share.avail[n] === T) {
+      const per = Array.from({ length: P }, (_, i) => {
+        let k = 0;
+        for (let s = 0; s < S; s++) if (n in segAt(i * S + s)) k++;
+        return k;
+      });
+      for (let i = 0; i < P; i++) for (let j = i + 1; j < P; j++) {
+        if (Math.abs(per[i] - per[j]) > 1) hard(`${n} plays ${per[i]} segments in the ${tm.periodName(i)} but ${per[j]} in the ${tm.periodName(j)}; periods must be within one segment of each other.`);
       }
     }
   }
@@ -394,10 +423,11 @@ export function checkLineup(plans, players, cfg, rules) {
   const segs = Object.fromEntries(full.map((p) => [p.name, 0]));
   for (let t = 0; t < T; t++) for (const n of Object.keys(segAt(t))) if (n in segs) segs[n]++;
   const vals = Object.values(segs);
-  if (vals.length && Math.max(...vals) - Math.min(...vals) > 1) {
-    const most = full.filter((p) => segs[p.name] === Math.max(...vals)).map((p) => p.name).join(", ");
-    const least = full.filter((p) => segs[p.name] === Math.min(...vals)).map((p) => p.name).join(", ");
-    note(`Playing time is uneven: ${most} ${Math.max(...vals)} segments, ${least} ${Math.min(...vals)}.`);
+  const max = Math.max(...vals), min = Math.min(...vals);
+  if (vals.length && max - min > 1) {
+    const most = full.filter((p) => segs[p.name] === max).map((p) => p.name).join(", ");
+    const least = full.filter((p) => segs[p.name] === min).map((p) => p.name).join(", ");
+    note(`Playing time is uneven: ${most} ${max} segments, ${least} ${min}.`);
   }
   return issues;
 }
