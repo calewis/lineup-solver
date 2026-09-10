@@ -108,6 +108,21 @@ function writeJSON(key, value) {
   }
 }
 
+// Offer a JSON file for download. The link has to be in the document and the
+// blob URL kept alive until the browser has started the download, or Safari
+// and Firefox quietly drop it.
+function downloadJSON(filename, value) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
+}
+
 // ---------- Derived views ----------
 function minutesFor(result, players, cfg) {
   const tm = timingOf(cfg);
@@ -156,6 +171,7 @@ export default function LineupSolver() {
   const [commitLabel, setCommitLabel] = useState("");
   const [commitDate, setCommitDate] = useState(todayISO());
   const [openGame, setOpenGame] = useState(null);
+  const [printGame, setPrintGame] = useState(null); // history entry id being printed
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [newName, setNewName] = useState("");
@@ -166,8 +182,18 @@ export default function LineupSolver() {
   const setupImportRef = useRef(null);
 
   const tm = useMemo(() => timingOf(cfg), [cfg]);
-  const periodWord = tm.type === "halves" ? "half" : "quarter";
-  const subsPhrase = tm.subTimes.length ? `subs at ${listWithAnd(tm.subTimes)} each ${periodWord}` : "no subs within a period";
+  const subsPhraseFor = (t) => (t.subTimes.length ? `subs at ${listWithAnd(t.subTimes)} each ${t.type === "halves" ? "half" : "quarter"}` : "no subs within a period");
+  const subsPhrase = subsPhraseFor(tm);
+
+  // Printing an old game: swap the print sheet to that game, print once it
+  // has rendered, then switch back.
+  useEffect(() => {
+    if (printGame == null) return;
+    const done = () => setPrintGame(null);
+    window.addEventListener("afterprint", done);
+    const id = setTimeout(() => window.print(), 50);
+    return () => { clearTimeout(id); window.removeEventListener("afterprint", done); };
+  }, [printGame]);
 
   const flash = (msg) => {
     setNote(msg);
@@ -232,12 +258,9 @@ export default function LineupSolver() {
     flash("Setup cleared");
   };
   const exportSetup = () => {
-    const blob = new Blob([JSON.stringify({ players, cfg, rules }, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `greyhounds-setup-${todayISO()}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const name = `greyhounds-setup-${todayISO()}.json`;
+    downloadJSON(name, { players, cfg, rules });
+    flash(`Downloading ${name}`);
   };
   const importSetup = (file) => {
     if (!file) return;
@@ -360,12 +383,9 @@ export default function LineupSolver() {
     setConfirmDelete(null);
   };
   const exportHistory = () => {
-    const blob = new Blob([JSON.stringify(history, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `greyhounds-history-${todayISO()}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const name = `greyhounds-history-${todayISO()}.json`;
+    downloadJSON(name, history);
+    flash(`Downloading ${name}`);
   };
   const importHistory = (file) => {
     if (!file) return;
@@ -651,31 +671,38 @@ export default function LineupSolver() {
     </table>
   );
 
-  const printSheet = () => (
-    <div className="hidden print:block p-2 text-slate-900">
-      <div className="flex items-baseline justify-between mb-2">
-        <h1 className="text-xl font-extrabold text-emerald-950">Greyhounds lineup</h1>
-        <span className="text-xs text-slate-500">{tm.P} {tm.type} of {tm.L} min · {subsPhrase}</span>
+  // snap as for boardFor, plus minutes and an optional title for old games.
+  const printSheet = (snap, minutes, title) => {
+    const st = timingOf(snap.cfg);
+    return (
+      <div className="hidden print:block p-2 text-slate-900">
+        <div className="flex items-baseline justify-between mb-2">
+          <h1 className="text-xl font-extrabold text-emerald-950">Greyhounds lineup{title ? ` · ${title}` : ""}</h1>
+          <span className="text-xs text-slate-500">{st.P} {st.type} of {st.L} min · {subsPhraseFor(st)}</span>
+        </div>
+        {Array.from({ length: st.P }, (_, h) => (
+          <section key={h} className="mb-3">
+            <h2 className="text-sm font-bold text-emerald-950 mb-1">{st.periodName(h)} · {st.gks[h]} in goal</h2>
+            {boardFor(h, snap, true)}
+          </section>
+        ))}
+        {minutes && (
+          <p className="text-[10px] text-slate-500 leading-relaxed">
+            <span className="font-semibold text-slate-600">Minutes: </span>
+            {snap.players.filter((p) => p.out !== "absent" && minutes[p.name]).map((p) => `${p.name} ${minutes[p.name].min}`).join(" · ")}
+          </p>
+        )}
+        {snap.slots && (
+          <section className="break-before-page">
+            <h2 className="text-sm font-bold text-emerald-950 mb-1">Field positions by segment</h2>
+            <p className="text-[10px] text-slate-600 mb-2">Dashed box ▼ = comes off at the end of this segment, with who comes on for them. Underlined ▲ on the bench = coming on next.</p>
+            <div className="grid grid-cols-2 gap-2">{allFields(snap, false, true)}</div>
+          </section>
+        )}
       </div>
-      {Array.from({ length: tm.P }, (_, h) => (
-        <section key={h} className="mb-3">
-          <h2 className="text-sm font-bold text-emerald-950 mb-1">{tm.periodName(h)} · {tm.gks[h]} in goal</h2>
-          {boardFor(h, current, true)}
-        </section>
-      ))}
-      {mins && (
-        <p className="text-[10px] text-slate-500 leading-relaxed">
-          <span className="font-semibold text-slate-600">Minutes: </span>
-          {players.filter((p) => p.out !== "absent").map((p) => `${p.name} ${mins[p.name].min}`).join(" · ")}
-        </p>
-      )}
-      <section className="break-before-page">
-        <h2 className="text-sm font-bold text-emerald-950 mb-1">Field positions by segment</h2>
-        <p className="text-[10px] text-slate-600 mb-2">Dashed box ▼ = comes off at the end of this segment, with who comes on for them. Underlined ▲ on the bench = coming on next.</p>
-        <div className="grid grid-cols-2 gap-2">{allFields(current, false, true)}</div>
-      </section>
-    </div>
-  );
+    );
+  };
+  const printing = printGame != null ? history.find((g) => g.id === printGame) : null;
 
   const numInput = (r, min, max, field = "n") => (
     <input type="number" min={min} max={max} value={r[field]}
@@ -700,7 +727,9 @@ export default function LineupSolver() {
 
   return (
     <div className="min-h-screen bg-stone-50 print:bg-white text-slate-900" style={{ fontFamily: "ui-sans-serif, system-ui" }}>
-      {result && printSheet()}
+      {printing
+        ? printSheet({ plans: printing.plans, slots: printing.slots, cfg: printing.cfg, players: printing.players }, printing.minutes, `${printing.label || "Game"} ${printing.date}`)
+        : result && printSheet(current, mins)}
       {swapNote && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 max-w-md w-[calc(100%-2rem)] print:hidden">
           <div className={`rounded-xl border shadow-lg p-4 text-sm bg-white ${swapNote.hardCount ? "border-red-400" : "border-emerald-400"}`}>
@@ -920,6 +949,7 @@ export default function LineupSolver() {
                           <button onClick={() => setOpenGame(openGame === g.id ? null : g.id)} className={`${btn} py-1`}>
                             {openGame === g.id ? "Hide" : "Show"}
                           </button>
+                          <button onClick={() => setPrintGame(g.id)} className={`${btn} py-1`} title="Print this game's schedule">Print</button>
                           {confirmDelete === g.id ? (
                             <>
                               <button onClick={() => deleteGame(g.id)} className="px-3 py-1 rounded-lg bg-red-700 text-white font-medium">Delete</button>
