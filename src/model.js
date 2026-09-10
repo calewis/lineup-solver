@@ -18,13 +18,63 @@ export function available(p, t) {
   return t < p.out;
 }
 
-function mulberry32(seed) {
+export function mulberry32(seed) {
   return function () {
     let t = (seed += 0x6d2b79f5);
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+// Named positions within each role, listed left to right as seen from the
+// team's own goal.
+export const SLOTS = { F: ["LF", "RF"], M: ["LM", "CM", "RM"], D: ["LB", "CB", "RB"] };
+
+function shuffle(a, rnd) {
+  const b = a.slice();
+  for (let i = b.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [b[i], b[j]] = [b[j], b[i]];
+  }
+  return b;
+}
+
+// Give every on-field player a named position. A player who stays on in the
+// same role keeps their spot; newcomers take the vacated spots at random.
+export function assignSlots(plans, seed) {
+  const rnd = mulberry32(seed * 7 + 1);
+  return plans.map((half) => {
+    const out = [];
+    half.forEach((seg, s) => {
+      const asg = {};
+      for (const r of ROLES) {
+        const names = Object.keys(seg).filter((n) => seg[n] === r);
+        const free = new Set(SLOTS[r]);
+        const fresh = [];
+        for (const n of names) {
+          const prev = s > 0 && half[s - 1][n] === r ? out[s - 1][n] : null;
+          if (prev && free.has(prev)) { asg[n] = prev; free.delete(prev); }
+          else fresh.push(n);
+        }
+        const open = shuffle([...free], rnd);
+        fresh.forEach((n, i) => { asg[n] = open[i]; });
+      }
+      out.push(asg);
+    });
+    return out;
+  });
+}
+
+// Swap two named positions from segment s through the end of the half, so
+// everyone who stays on the field keeps a consistent spot.
+export function swapSlots(slots, h, s, slotA, slotB) {
+  return slots.map((half, hh) => hh !== h ? half : half.map((seg, ss) => {
+    if (ss < s) return seg;
+    const next = {};
+    for (const [n, sl] of Object.entries(seg)) next[n] = sl === slotA ? slotB : sl === slotB ? slotA : sl;
+    return next;
+  }));
 }
 
 export function buildModel(players, cfg, rules, seed) {

@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import highsLoader from "highs";
 import highsWasmUrl from "highs/runtime?url";
-import { SEGS, SEG_LEN, ROLES, T, buildModel, available } from "./model.js";
+import { SEGS, SEG_LEN, ROLES, SLOTS, buildModel, available, assignSlots, swapSlots } from "./model.js";
 
 // ---------- Constants ----------
 const SEG_LABEL = ["0–6", "6–12", "12–18", "18–25"];
+const SLOT_NAME = { LF: "Left forward", RF: "Right forward", LM: "Left mid", CM: "Center mid", RM: "Right mid", LB: "Left back", CB: "Center back", RB: "Right back" };
 const ROLE_NAME = { D: "Defense", M: "Mid", F: "Forward", GK: "In goal", B: "Bench", O: "Out" };
 const ROLE_PHRASE = { any: "on the field", D: "in defense", M: "in midfield", F: "at forward" };
 const RULE_TEMPLATES = [
@@ -154,6 +155,7 @@ export default function LineupSolver() {
   const [commitDate, setCommitDate] = useState(todayISO());
   const [openGame, setOpenGame] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [pick, setPick] = useState(null); // chip selected for a position swap
   const importRef = useRef(null);
 
   const flash = (msg) => {
@@ -172,12 +174,15 @@ export default function LineupSolver() {
       console.error("solver failed", e);
       out = { reason: "The solver hit an unexpected error." };
     }
-    setSol({ result: out.result || null, reason: out.reason ?? null, players: p, cfg: c, rules: r });
+    const slots = out.result ? assignSlots(out.result.plans, s) : null;
+    setSol({ result: out.result || null, slots, reason: out.reason ?? null, players: p, cfg: c, rules: r });
+    setPick(null);
     setSolving(false);
   };
   const run = (s = seed) => solveWith(players, cfg, rules, s);
   const stale = !!sol && (sol.players !== players || sol.cfg !== cfg || sol.rules !== rules);
   const result = sol && !stale ? sol.result : null;
+  const slots = sol && !stale ? sol.slots : null;
   const failReason = sol && !stale && !sol.result ? sol.reason : null;
 
   // Restore a saved setup and history. Only a saved setup gets solved on load;
@@ -216,6 +221,7 @@ export default function LineupSolver() {
       cfg: { ...cfg },
       players: players.map((p) => ({ ...p })),
       plans: result.plans,
+      slots,
       minutes: mins,
     };
     saveHistory([entry, ...history]);
@@ -341,7 +347,67 @@ export default function LineupSolver() {
       </div>
     );
   };
-  const current = result ? { plans: result.plans, cfg, players } : null;
+  const current = result ? { plans: result.plans, slots, cfg, players } : null;
+
+  // ----- field view with named positions -----
+  const doSwap = (h, s, a, b) => {
+    if (!slots || a === b) return;
+    const seg = current.plans[h][s];
+    if (seg[a] !== seg[b]) return; // only within a role
+    setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]) });
+    setPick(null);
+  };
+  const chip = (name, slot, h, s, interactive, compact) => {
+    const selected = pick && pick.h === h && pick.s === s && pick.name === name;
+    const sameRow = pick && pick.h === h && pick.s === s && current.plans[h][s][pick.name] === current.plans[h][s][name];
+    const size = compact ? "text-[9px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]";
+    const Tag = interactive ? "button" : "div";
+    return (
+      <Tag key={slot} draggable={interactive || undefined}
+        onClick={interactive ? () => (pick ? (sameRow ? doSwap(h, s, pick.name, name) : setPick({ h, s, name })) : setPick({ h, s, name })) : undefined}
+        onDragStart={interactive ? (e) => { setPick({ h, s, name }); e.dataTransfer.effectAllowed = "move"; } : undefined}
+        onDragOver={interactive ? (e) => { if (sameRow) e.preventDefault(); } : undefined}
+        onDrop={interactive ? (e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, name); } : undefined}
+        title={interactive ? `${SLOT_NAME[slot]} — tap or drag onto a teammate in the same row to swap` : SLOT_NAME[slot]}
+        className={`rounded-md bg-white text-slate-900 text-center leading-tight shadow-sm ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameRow && interactive ? "ring-2 ring-white/70" : ""}`}>
+        <span className="block font-semibold">{name}</span>
+        <span className="block text-slate-500">{slot}</span>
+      </Tag>
+    );
+  };
+  const fieldView = (h, s, snap, interactive = false, compact = false) => {
+    const seg = snap.plans[h][s];
+    const sl = (snap.slots && snap.slots[h][s]) || {};
+    const gk = h === 0 ? snap.cfg.gk1 : snap.cfg.gk2;
+    const t = h * SEGS + s;
+    const bench = snap.players
+      .filter((p) => seg[p.name] === undefined && p.name !== gk && available(p, t))
+      .map((p) => p.name).sort();
+    const row = (r) => SLOTS[r].map((slot) => {
+      const name = Object.keys(sl).find((n) => sl[n] === slot);
+      return name ? chip(name, slot, h, s, interactive, compact) : <div key={slot} className="min-w-[3rem]" />;
+    });
+    return (
+      <div className={`rounded-xl bg-emerald-700 text-white ${compact ? "p-1.5" : "p-2.5"}`}>
+        <div className={`flex justify-between font-semibold ${compact ? "text-[10px] mb-1" : "text-xs mb-1.5"}`}>
+          <span>{h === 0 ? "1st half" : "2nd half"} · {SEG_LABEL[s]}</span>
+          <span className="opacity-80">{gk} in goal</span>
+        </div>
+        <div className={`rounded-lg border-2 border-white/60 ${compact ? "p-1 space-y-1" : "p-2 space-y-2"}`}>
+          {["F", "M", "D"].map((r) => (
+            <div key={r} className={`flex justify-around ${compact ? "gap-0.5" : "gap-1"}`}>{row(r)}</div>
+          ))}
+          <div className="flex justify-center">
+            <div className={`rounded-md bg-slate-900 text-white text-center ${compact ? "text-[9px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]"}`}>
+              <span className="block font-semibold">{gk}</span>
+              <span className="block text-slate-400">GK</span>
+            </div>
+          </div>
+        </div>
+        <div className={`${compact ? "text-[9px] mt-1" : "text-[11px] mt-1.5"} opacity-90`}>Bench: {bench.join(", ") || "—"}</div>
+      </div>
+    );
+  };
 
   const minutesTable = (rows, ps) => (
     <table className="w-full text-sm">
@@ -388,6 +454,14 @@ export default function LineupSolver() {
           {players.filter((p) => p.out !== "absent").map((p) => `${p.name} ${mins[p.name].min}`).join(" · ")}
         </p>
       )}
+      <section className="break-before-page">
+        <h2 className="text-sm font-bold text-emerald-950 mb-2">Field positions by segment</h2>
+        <div className="grid grid-cols-2 gap-2">
+          {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
+            <div key={`${h}-${s}`}>{fieldView(h, s, current, false, true)}</div>
+          )))}
+        </div>
+      </section>
     </div>
   );
 
@@ -447,13 +521,13 @@ export default function LineupSolver() {
             )}
 
             <div className="flex flex-wrap gap-2">
-              {["First half", "Second half", "Minutes", `History (${history.length})`].map((t, i) => (
+              {["First half", "Second half", "Field", "Minutes", `History (${history.length})`].map((t, i) => (
                 <button key={t} onClick={() => setTab(i)}
                   className={`px-4 py-2 rounded-lg font-semibold ${tab === i ? "bg-emerald-900 text-white" : "bg-white border border-slate-300 text-slate-700 hover:bg-slate-100"}`}>{t}</button>
               ))}
             </div>
 
-            {tab < 3 && (
+            {tab < 4 && (
               <>
                 {stale && (
                   <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
@@ -491,7 +565,19 @@ export default function LineupSolver() {
                           {halfBoard(tab, current)}
                         </>
                       )}
-                      {tab === 2 && mins && minutesTable(mins, players)}
+                      {tab === 2 && (
+                        <>
+                          <p className="text-sm text-slate-500 mb-3">
+                            Positions within a line are assigned at random. Tap a player, then a teammate in the same row, to swap them; the swap carries forward through the rest of that half. No re-solve needed.
+                          </p>
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
+                              <div key={`${h}-${s}`}>{fieldView(h, s, current, true)}</div>
+                            )))}
+                          </div>
+                        </>
+                      )}
+                      {tab === 3 && mins && minutesTable(mins, players)}
                     </div>
                     <p className="text-xs text-slate-500">
                       Built in: playing time is shared evenly among everyone who's here, nobody sits twice in a row (including across halftime), goalies get a full half in net plus their field segments, and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
@@ -501,7 +587,7 @@ export default function LineupSolver() {
               </>
             )}
 
-            {tab === 3 && (
+            {tab === 4 && (
               <div className="space-y-4">
                 <div className="bg-white rounded-xl border border-slate-200 p-4">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -574,6 +660,13 @@ export default function LineupSolver() {
                             {halfBoard(h, { plans: g.plans, cfg: g.cfg, players: g.players }, true)}
                           </div>
                         ))}
+                        {g.slots && (
+                          <div className="grid sm:grid-cols-2 gap-2">
+                            {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
+                              <div key={`${h}-${s}`}>{fieldView(h, s, { plans: g.plans, slots: g.slots, cfg: g.cfg, players: g.players }, false, true)}</div>
+                            )))}
+                          </div>
+                        )}
                         {minutesTable(g.minutes || {}, g.players)}
                       </div>
                     )}
