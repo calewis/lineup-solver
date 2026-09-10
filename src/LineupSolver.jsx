@@ -562,7 +562,7 @@ export default function LineupSolver() {
   const chip = (name, slot, h, s, interactive, compact, sub = {}) => {
     const selected = pick && pick.h === h && pick.s === s && pick.name === name;
     const sameSeg = pick && pick.h === h && pick.s === s && !selected;
-    const size = compact ? "text-[9px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]";
+    const size = compact ? "text-[9px] print:text-[10px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]";
     const off = sub.off && sub.off[name];
     const move = sub.moves && sub.moves[name];
     // Off: amber on screen, dashed black border in print.
@@ -577,11 +577,11 @@ export default function LineupSolver() {
         onDragOver={interactive ? (e) => { if (sameSeg) e.preventDefault(); } : undefined}
         onDrop={interactive ? (e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, name); } : undefined}
         title={interactive ? `${slotName(slot)} — tap or drag onto another player in this segment to swap` : slotName(slot)}
-        className={`rounded-md text-slate-900 text-center leading-tight shadow-sm ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameSeg && interactive ? "ring-2 ring-white/70" : ""}`}>
+        className={`rounded-md text-slate-900 text-center leading-tight shadow-sm print:shadow-none ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameSeg && interactive ? "ring-2 ring-white/70" : ""}`}>
         <span className="block font-semibold">{name}</span>
-        <span className="block text-slate-500">{slot}</span>
+        <span className="block text-slate-500 print:text-slate-800">{slot}</span>
         {off && <span className="block font-semibold text-amber-900 print:text-black">▼ off{off !== true ? ` · ${off} on` : ""}</span>}
-        {move && !off && <span className="block text-slate-500">→ {move} next</span>}
+        {move && !off && <span className="block text-slate-500 print:text-slate-800">→ {move} next</span>}
       </Tag>
     );
   };
@@ -602,22 +602,22 @@ export default function LineupSolver() {
     });
     return (
       <div className={`rounded-xl bg-emerald-700 text-white ${compact ? "p-1.5" : "p-2.5"}`}>
-        <div className={`flex justify-between font-semibold ${compact ? "text-[10px] mb-1" : "text-xs mb-1.5"}`}>
+        <div className={`flex justify-between font-semibold ${compact ? "text-[10px] mb-1 print:mb-0.5" : "text-xs mb-1.5"}`}>
           <span>{st.periodName(h)} · {st.segLabels[s]}</span>
-          <span className="opacity-80">{gk} in goal</span>
+          <span className="opacity-80 print:opacity-100">{gk} in goal</span>
         </div>
-        <div className={`rounded-lg border-2 border-white/60 ${compact ? "p-1 space-y-1" : "p-2 space-y-2"}`}>
+        <div className={`rounded-lg border-2 border-white/60 print:border-white ${compact ? "p-1 space-y-1 print:space-y-0.5" : "p-2 space-y-2"}`}>
           {["F", "M", "D"].map((r) => (
             <div key={r} className={`flex justify-around ${compact ? "gap-0.5" : "gap-1"}`}>{row(r)}</div>
           ))}
           <div className="flex justify-center">
-            <div className={`rounded-md bg-slate-900 text-white text-center ${compact ? "text-[9px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]"}`}>
+            <div className={`rounded-md bg-slate-900 text-white text-center ${compact ? "text-[9px] print:text-[10px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]"}`}>
               <span className="block font-semibold">{gk}</span>
-              <span className="block text-slate-400">GK</span>
+              <span className="block text-slate-400 print:text-slate-200">GK</span>
             </div>
           </div>
         </div>
-        <div className={`${compact ? "text-[9px] mt-1" : "text-[11px] mt-1.5"} opacity-90 flex flex-wrap items-center gap-1`}>
+        <div className={`${compact ? "text-[9px] print:text-[10px] mt-1 print:mt-0.5" : "text-[11px] mt-1.5"} opacity-90 print:opacity-100 flex flex-wrap items-center gap-1`}>
           <span>Bench:</span>
           {bench.length === 0 && "—"}
           {bench.map((n) => {
@@ -642,7 +642,7 @@ export default function LineupSolver() {
   const allFields = (snap, interactive, compact) => {
     const st = timingOf(snap.cfg);
     const out = [];
-    for (let h = 0; h < st.P; h++) for (let s = 0; s < st.S; s++) out.push(<div key={`${h}-${s}`}>{fieldView(h, s, snap, interactive, compact)}</div>);
+    for (let h = 0; h < st.P; h++) for (let s = 0; s < st.S; s++) out.push(<div key={`${h}-${s}`} className="break-inside-avoid">{fieldView(h, s, snap, interactive, compact)}</div>);
     return out;
   };
 
@@ -696,7 +696,7 @@ export default function LineupSolver() {
           <section className="break-before-page">
             <h2 className="text-sm font-bold text-emerald-950 mb-1">Field positions by segment</h2>
             <p className="text-[10px] text-slate-600 mb-2">Dashed box ▼ = comes off at the end of this segment, with who comes on for them. Underlined ▲ on the bench = coming on next.</p>
-            <div className="grid grid-cols-2 gap-2">{allFields(snap, false, true)}</div>
+            <div className="grid grid-cols-2 gap-x-2 gap-y-1">{allFields(snap, false, true)}</div>
           </section>
         )}
       </div>
