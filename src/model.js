@@ -262,3 +262,68 @@ export function buildModel(players, cfg, rules, seed) {
 
   return { lp, decode };
 }
+
+// ---------- Validation of a hand-edited lineup ----------
+const HALF_NAME = ["1st half", "2nd half"];
+const SEG_TIMES = ["0–6", "6–12", "12–18", "18–25"];
+const ROLE_WORD = { D: "defense", M: "midfield", F: "forward", any: "the field" };
+const segLabel = (t) => `${HALF_NAME[Math.floor(t / SEGS)]} ${SEG_TIMES[t % SEGS]}`;
+
+// Returns a list of { level: "hard" | "note", text }. Hard items are rules the
+// solver would never break; notes are things the solver balances but a coach
+// may choose to override.
+export function checkLineup(plans, players, cfg, rules) {
+  const issues = [];
+  const hard = (text) => issues.push({ level: "hard", text });
+  const note = (text) => issues.push({ level: "note", text });
+  const byName = Object.fromEntries(players.map((p) => [p.name, p]));
+  const segAt = (t) => plans[Math.floor(t / SEGS)][t % SEGS];
+  const gkOf = (t) => (t < SEGS ? cfg.gk1 : cfg.gk2);
+
+  for (let t = 0; t < T; t++) {
+    const seg = segAt(t);
+    const counts = { D: 0, M: 0, F: 0 };
+    for (const [n, r] of Object.entries(seg)) {
+      counts[r]++;
+      const p = byName[n];
+      if (!p) { hard(`${n} is not on the roster (${segLabel(t)}).`); continue; }
+      if (n === gkOf(t)) hard(`${n} is in goal and on the field at once (${segLabel(t)}).`);
+      if (!available(p, t)) hard(`${n} is marked out but on the field (${segLabel(t)}).`);
+      if ((p.never || []).includes(r)) hard(`${n} is at ${ROLE_WORD[r]} but marked Never (${segLabel(t)}).`);
+    }
+    for (const r of ROLES) if (counts[r] !== NEED[r]) hard(`${segLabel(t)} has ${counts[r]} at ${ROLE_WORD[r]} instead of ${NEED[r]}.`);
+    for (const rule of rules) {
+      const c = rule.players.filter((n) => n in seg && (rule.role === "any" || seg[n] === rule.role)).length;
+      const who = `of ${rule.players.join(", ")} on ${ROLE_WORD[rule.role]}`;
+      if (rule.type === "atMost" && c > rule.n) hard(`${c} ${who}, at most ${rule.n} allowed (${segLabel(t)}).`);
+      if (rule.type === "atLeast" && c < rule.n) hard(`${c} ${who}, at least ${rule.n} needed (${segLabel(t)}).`);
+      if (rule.type === "between" && (c < rule.lo || c > rule.hi)) hard(`${c} ${who}, must be between ${rule.lo} and ${rule.hi} (${segLabel(t)}).`);
+      if (rule.type === "notBoth" && c >= 2) hard(`Two ${who}, they must be kept apart (${segLabel(t)}).`);
+    }
+  }
+
+  // Sitting twice in a row, and position changes during a stint.
+  for (const p of players) {
+    const n = p.name;
+    for (let t = 0; t < T - 1; t++) {
+      const here = available(p, t) && n !== gkOf(t);
+      const next = available(p, t + 1) && n !== gkOf(t + 1);
+      if (here && next && !(n in segAt(t)) && !(n in segAt(t + 1))) hard(`${n} sits out ${segLabel(t)} and ${segLabel(t + 1)} back to back.`);
+      if ((t + 1) % SEGS !== 0 && n in segAt(t) && n in segAt(t + 1) && segAt(t)[n] !== segAt(t + 1)[n]) {
+        note(`${n} moves from ${ROLE_WORD[segAt(t)[n]]} to ${ROLE_WORD[segAt(t + 1)[n]]} without leaving the field (${segLabel(t + 1)}).`);
+      }
+    }
+  }
+
+  // Playing time spread among outfielders here for the whole game.
+  const full = players.filter((p) => p.out == null && p.name !== cfg.gk1 && p.name !== cfg.gk2);
+  const segs = Object.fromEntries(full.map((p) => [p.name, 0]));
+  for (let t = 0; t < T; t++) for (const n of Object.keys(segAt(t))) if (n in segs) segs[n]++;
+  const vals = Object.values(segs);
+  if (vals.length && Math.max(...vals) - Math.min(...vals) > 1) {
+    const most = full.filter((p) => segs[p.name] === Math.max(...vals)).map((p) => p.name).join(", ");
+    const least = full.filter((p) => segs[p.name] === Math.min(...vals)).map((p) => p.name).join(", ");
+    note(`Playing time is uneven: ${most} ${Math.max(...vals)} segments, ${least} ${Math.min(...vals)}.`);
+  }
+  return issues;
+}

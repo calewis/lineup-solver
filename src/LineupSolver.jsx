@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import highsLoader from "highs";
 import highsWasmUrl from "highs/runtime?url";
-import { SEGS, SEG_LEN, ROLES, SLOTS, buildModel, available, assignSlots, swapSlots } from "./model.js";
+import { SEGS, SEG_LEN, ROLES, SLOTS, buildModel, available, assignSlots, swapSlots, checkLineup } from "./model.js";
 
 // ---------- Constants ----------
 const SEG_LABEL = ["0–6", "6–12", "12–18", "18–25"];
@@ -153,6 +153,8 @@ export default function LineupSolver() {
   const [openGame, setOpenGame] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [swapNote, setSwapNote] = useState(null); // minutes impact of the last manual swap
+  const swapTimer = useRef(null);
   const [pick, setPick] = useState(null); // chip selected for a position swap
   const importRef = useRef(null);
 
@@ -173,7 +175,7 @@ export default function LineupSolver() {
       out = { reason: "The solver hit an unexpected error." };
     }
     const slots = out.result ? assignSlots(out.result.plans, s) : null;
-    setSol({ result: out.result || null, slots, reason: out.reason ?? null, players: p, cfg: c, rules: r });
+    setSol({ result: out.result || null, slots, original: out.result ? { result: out.result, slots } : null, edited: false, reason: out.reason ?? null, players: p, cfg: c, rules: r });
     setPick(null);
     setSolving(false);
   };
@@ -219,6 +221,15 @@ export default function LineupSolver() {
   };
 
   const mins = useMemo(() => (result ? minutesFor(result, players, cfg) : null), [result, players, cfg]);
+  const edited = !!sol && !stale && sol.edited;
+  const issues = useMemo(() => (result && edited ? checkLineup(result.plans, players, cfg, rules) : []), [result, edited, players, cfg, rules]);
+  const hardIssues = issues.filter((i) => i.level === "hard");
+  const noteIssues = issues.filter((i) => i.level === "note");
+  const undoEdits = () => {
+    if (!sol || !sol.original) return;
+    setSol({ ...sol, result: sol.original.result, slots: sol.original.slots, edited: false });
+    setPick(null);
+  };
 
   // ----- history -----
   const commitGame = () => {
@@ -359,12 +370,41 @@ export default function LineupSolver() {
   const current = result ? { plans: result.plans, slots, cfg, players } : null;
 
   // ----- field view with named positions -----
+  // Swap two players in one segment. Same row: swap sides, carried through
+  // the half. Different rows or the bench: exchange roles and spots in this
+  // segment only, then re-check the hard rules.
   const doSwap = (h, s, a, b) => {
     if (!slots || a === b) return;
     const seg = current.plans[h][s];
-    if (seg[a] !== seg[b]) return; // only within a role
-    setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]) });
+    const ra = seg[a], rb = seg[b];
+    if (ra !== undefined && ra === rb) {
+      setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]) });
+      setPick(null);
+      return;
+    }
+    const nseg = { ...seg };
+    const nsl = { ...slots[h][s] };
+    const sa = nsl[a], sb = nsl[b];
+    if (rb !== undefined) { nseg[a] = rb; nsl[a] = sb; } else { delete nseg[a]; delete nsl[a]; }
+    if (ra !== undefined) { nseg[b] = ra; nsl[b] = sa; } else { delete nseg[b]; delete nsl[b]; }
+    const plans = result.plans.map((half, hh) => half.map((sg, ss) => (hh === h && ss === s ? nseg : sg)));
+    const nslots = slots.map((half, hh) => half.map((sg, ss) => (hh === h && ss === s ? nsl : sg)));
+    setSol({ ...sol, result: { ...result, plans }, slots: nslots, edited: true });
     setPick(null);
+    // Tell the coach what the swap did to minutes and to the hard rules.
+    const before = minutesFor(result, players, cfg);
+    const after = minutesFor({ plans }, players, cfg);
+    const hardCount = checkLineup(plans, players, cfg, rules).filter((i) => i.level === "hard").length;
+    const line = (n) => (before[n].min === after[n].min
+      ? `${n}: ${after[n].min} min (unchanged)`
+      : `${n}: ${before[n].min} → ${after[n].min} min (${after[n].min > before[n].min ? "+" : ""}${after[n].min - before[n].min})`);
+    setSwapNote({
+      title: ra !== undefined && rb !== undefined ? `Swapped ${a} and ${b} in ${SEG_LABEL[s]} of the ${h === 0 ? "1st" : "2nd"} half` : `${rb === undefined ? b : a} on for ${rb === undefined ? a : b} in ${SEG_LABEL[s]} of the ${h === 0 ? "1st" : "2nd"} half`,
+      lines: [line(a), line(b)],
+      hardCount,
+    });
+    clearTimeout(swapTimer.current);
+    swapTimer.current = setTimeout(() => setSwapNote(null), 8000);
   };
   // Substitution markers for one segment: who comes off at the end of it and
   // who is arriving at the start of it. Within a half a newcomer takes the
@@ -392,7 +432,7 @@ export default function LineupSolver() {
   };
   const chip = (name, slot, h, s, interactive, compact, sub = {}) => {
     const selected = pick && pick.h === h && pick.s === s && pick.name === name;
-    const sameRow = pick && pick.h === h && pick.s === s && current.plans[h][s][pick.name] === current.plans[h][s][name];
+    const sameRow = pick && pick.h === h && pick.s === s && !selected;
     const size = compact ? "text-[9px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]";
     const off = sub.off && sub.off[name];
     const on = sub.on && sub.on[name];
@@ -409,7 +449,7 @@ export default function LineupSolver() {
         onDragStart={interactive ? (e) => { setPick({ h, s, name }); e.dataTransfer.effectAllowed = "move"; } : undefined}
         onDragOver={interactive ? (e) => { if (sameRow) e.preventDefault(); } : undefined}
         onDrop={interactive ? (e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, name); } : undefined}
-        title={interactive ? `${SLOT_NAME[slot]} — tap or drag onto a teammate in the same row to swap` : SLOT_NAME[slot]}
+        title={interactive ? `${SLOT_NAME[slot]} — tap or drag onto another player in this segment to swap` : SLOT_NAME[slot]}
         className={`rounded-md text-slate-900 text-center leading-tight shadow-sm ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameRow && interactive ? "ring-2 ring-white/70" : ""}`}>
         <span className="block font-semibold">{name}</span>
         <span className="block text-slate-500">{slot}</span>
@@ -448,10 +488,24 @@ export default function LineupSolver() {
             </div>
           </div>
         </div>
-        <div className={`${compact ? "text-[9px] mt-1" : "text-[11px] mt-1.5"} opacity-90`}>
-          Bench: {bench.length === 0 ? "—" : bench.map((n, i) => (
-            <span key={n}>{i > 0 && ", "}{sub.comingOn.includes(n) ? <span className="font-bold underline">▲ {n}</span> : n}</span>
-          ))}
+        <div className={`${compact ? "text-[9px] mt-1" : "text-[11px] mt-1.5"} opacity-90 flex flex-wrap items-center gap-1`}>
+          <span>Bench:</span>
+          {bench.length === 0 && "—"}
+          {bench.map((n) => {
+            const label = sub.comingOn.includes(n) ? `▲ ${n}` : n;
+            if (!interactive) return <span key={n} className={sub.comingOn.includes(n) ? "font-bold underline" : ""}>{label}</span>;
+            const selected = pick && pick.h === h && pick.s === s && pick.name === n;
+            const target = pick && pick.h === h && pick.s === s && !selected;
+            return (
+              <button key={n} draggable
+                onClick={() => (pick ? (target ? doSwap(h, s, pick.name, n) : setPick({ h, s, name: n })) : setPick({ h, s, name: n }))}
+                onDragStart={(e) => { setPick({ h, s, name: n }); e.dataTransfer.effectAllowed = "move"; }}
+                onDragOver={(e) => { if (target) e.preventDefault(); }}
+                onDrop={(e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, n); }}
+                title="Tap or drag onto a player on the field to bring this player on in their place"
+                className={`px-1.5 py-0.5 rounded border border-white/50 bg-white/10 cursor-grab ${sub.comingOn.includes(n) ? "font-bold underline" : ""} ${selected ? "ring-2 ring-amber-400" : target ? "ring-2 ring-white/70" : ""}`}>{label}</button>
+            );
+          })}
         </div>
       </div>
     );
@@ -532,6 +586,22 @@ export default function LineupSolver() {
   return (
     <div className="min-h-screen bg-stone-50 print:bg-white text-slate-900" style={{ fontFamily: "ui-sans-serif, system-ui" }}>
       {result && printSheet()}
+      {swapNote && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 max-w-md w-[calc(100%-2rem)] print:hidden">
+          <div className={`rounded-xl border shadow-lg p-4 text-sm bg-white ${swapNote.hardCount ? "border-red-400" : "border-emerald-400"}`}>
+            <div className="flex items-start justify-between gap-3">
+              <p className="font-semibold text-slate-800">{swapNote.title}</p>
+              <button onClick={() => setSwapNote(null)} className="text-slate-400 hover:text-slate-700" title="Dismiss">✕</button>
+            </div>
+            <ul className="mt-1.5 space-y-0.5 text-slate-700">
+              {swapNote.lines.map((l) => <li key={l}>{l}</li>)}
+            </ul>
+            <p className={`mt-1.5 font-medium ${swapNote.hardCount ? "text-red-700" : "text-emerald-700"}`}>
+              {swapNote.hardCount ? `Breaks ${swapNote.hardCount} hard rule${swapNote.hardCount === 1 ? "" : "s"} — see the list above the lineup.` : "All hard rules still hold."}
+            </p>
+          </div>
+        </div>
+      )}
       <div className="max-w-6xl mx-auto p-4 md:p-8 print:hidden">
         <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
           <div>
@@ -611,6 +681,28 @@ export default function LineupSolver() {
                     </p>
                   </div>
                 )}
+                {result && edited && (
+                  <div className={`rounded-xl border p-4 ${hardIssues.length ? "bg-red-50 border-red-300 text-red-900" : "bg-emerald-50 border-emerald-300 text-emerald-900"}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <p className="font-semibold">
+                        {hardIssues.length
+                          ? `Hand-edited lineup breaks ${hardIssues.length} hard rule${hardIssues.length === 1 ? "" : "s"}.`
+                          : "Hand-edited lineup. All hard rules still hold."}
+                      </p>
+                      <button onClick={undoEdits} className={btn}>Undo edits</button>
+                    </div>
+                    {hardIssues.length > 0 && (
+                      <ul className="list-disc ml-5 mt-2 text-sm space-y-0.5">
+                        {hardIssues.map((i, k) => <li key={k}>{i.text}</li>)}
+                      </ul>
+                    )}
+                    {noteIssues.length > 0 && (
+                      <ul className="list-disc ml-5 mt-2 text-sm space-y-0.5 text-amber-900">
+                        {noteIssues.map((i, k) => <li key={k}>{i.text}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                )}
                 {result && (
                   <>
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
@@ -625,7 +717,7 @@ export default function LineupSolver() {
                       {tab === 2 && (
                         <>
                           <p className="text-sm text-slate-500 mb-3">
-                            Positions within a line are assigned at random. Tap a player, then a teammate in the same row, to swap them; the swap carries forward through the rest of that half. No re-solve needed.
+                            Tap a player, then any other player in that segment, to swap them. Same-row swaps just change sides and carry forward through the half. Swapping across rows or with the bench changes that segment only, and the hard rules are re-checked below. No re-solve needed.
                             <span className="block mt-1"><span className="inline-block w-3 h-3 rounded-sm bg-amber-200 border border-amber-500 align-middle mr-1" />▼ comes off at the end of this segment, with who takes their spot. <span className="inline-block w-3 h-3 rounded-sm bg-lime-200 border border-lime-500 align-middle mx-1" />▲ just came on.</span>
                           </p>
                           <div className="grid sm:grid-cols-2 gap-3">
