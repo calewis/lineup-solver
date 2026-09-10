@@ -21,8 +21,8 @@ const TINT = {
 };
 
 const DEFAULT_PLAYERS = [
-  { name: "Michael", pref: "", never: [], },
-  { name: "Ethan", pref: "", never: [], },
+  { name: "Michael", pref: "", never: ["D"] },
+  { name: "Ethan", pref: "", never: ["D", "F"] },
   { name: "Drew", pref: "F", never: [] },
   { name: "Isaac", pref: "F", never: [] },
   { name: "Khalid", pref: "D", never: [] },
@@ -49,7 +49,6 @@ const DEFAULT_CFG = {
   gk1: "Ethan", // goalie, first half
   gk2: "Michael", // goalie, second half
   goalieFieldSegs: 2, // field segments each goalie gets in their off half
-  goalieRoles: { Michael: ["M", "F"], Ethan: ["M"] }, // allowed field roles
 };
 
 // ---------- Solver ----------
@@ -172,11 +171,7 @@ function solveRoles(players, masks, gk, offG, cfg, rules, rnd) {
       for (let i = 0; i < fr.length; i++) {
         const n = fr[i], r = perm[i];
         const p = byName[n];
-        const allowed =
-          n === offG
-            ? (cfg.goalieRoles[n] || ROLES).includes(r)
-            : !(p.never || []).includes(r);
-        if (!allowed) { ok = false; break; }
+        if ((p.never || []).includes(r)) { ok = false; break; }
         asg[n] = r;
       }
       if (ok && checkSegment(asg, rules)) seg = asg;
@@ -231,7 +226,6 @@ function loadSetup(d) {
     gk1: c.gk1 ?? DEFAULT_CFG.gk1,
     gk2: c.gk2 ?? DEFAULT_CFG.gk2,
     goalieFieldSegs: c.goalieFieldSegs ?? DEFAULT_CFG.goalieFieldSegs,
-    goalieRoles: c.goalieRoles ?? DEFAULT_CFG.goalieRoles,
   };
   const rules = (d.rules || DEFAULT_RULES).map((r) => ({ ...r, role: r.role || "any" }));
   return { players, cfg, rules };
@@ -575,25 +569,6 @@ export default function LineupSolver() {
                     <option value={1}>1 (~31 min, even)</option>
                   </select>
                 </label>
-                {[cfg.gk1, cfg.gk2].map((g) => (
-                  <div key={g} className="flex items-center justify-between gap-2">
-                    <span>{g} on field plays</span>
-                    <div className="flex gap-1">
-                      {ROLES.map((r) => {
-                        const on = (cfg.goalieRoles[g] || ROLES).includes(r);
-                        return (
-                          <button key={r} onClick={() => {
-                            const cur = cfg.goalieRoles[g] || ROLES;
-                            const nv = on ? cur.filter((x) => x !== r) : [...cur, r];
-                            if (nv.length === 0) return;
-                            setCfg({ ...cfg, goalieRoles: { ...cfg.goalieRoles, [g]: nv } });
-                          }}
-                            className={`w-8 h-7 rounded-md border text-xs font-semibold ${on ? "bg-emerald-900 text-white border-emerald-900" : "bg-white text-slate-500 border-slate-300"}`}>{r}</button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
               </div>
             </section>
 
