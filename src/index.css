@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @media print {
-  @page { size: portrait; margin: 10mm; }
+  @page { size: portrait; margin: 8mm; }
   * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
   html, body { background: white; }
 }
