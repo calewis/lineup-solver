@@ -10,10 +10,15 @@ const roster = [
 const RULES = [
   { id: 1, type: "between", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", lo: 1, hi: 3 },
 ];
-const cfg = { gk1: "Ethan", gk2: "Michael", goalieFieldSegs: 2 };
+const cfg = { gk1: "Ethan", gk2: "Michael", goalieFieldSegs: 2, size: 9, formation: { D: 3, M: 3, F: 2 } };
+const cfg7 = { ...cfg, size: 7, formation: { D: 3, M: 2, F: 1 } };
+const cfg11 = { ...cfg, size: 11, formation: { D: 4, M: 4, F: 2 } };
 const withOut = (edits) => roster.map((p) => ({ ...p, out: edits[p.name] ?? null }));
 const cases = [
   ["full roster", roster, cfg],
+  ["7v7 3-2-1, 10 players", roster.slice(0, 10), cfg7],
+  ["11v11 4-4-2, 14 players", roster, cfg11],
+  ["11v11 4-4-2, 12 players", roster.slice(0, 12), cfg11],
   ["only 9 players, no rules", withOut({ Bobby: "absent", Piers: "absent", Lev: "absent", Adam: "absent", William: "absent" }), cfg, []],
   ["Bobby absent", withOut({ Bobby: "absent" }), cfg],
   ["Bobby + Piers absent", withOut({ Bobby: "absent", Piers: "absent" }), cfg],

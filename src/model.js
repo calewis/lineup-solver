@@ -6,9 +6,37 @@
 export const SEGS = 4; // per half
 export const SEG_LEN = [6, 6, 6, 7]; // minutes
 export const ROLES = ["D", "M", "F"];
-export const NEED = { D: 3, M: 3, F: 2 };
 export const T = 2 * SEGS; // segments in the game
-const FIELD = ROLES.reduce((a, r) => a + NEED[r], 0); // players on the field
+
+// Game sizes (players per side including the goalie) with a default
+// formation for each, and the common alternatives listed as D-M-F.
+export const GAME_SIZES = [7, 9, 11];
+export const DEFAULT_FORMATION = {
+  7: { D: 3, M: 2, F: 1 },
+  9: { D: 3, M: 3, F: 2 },
+  11: { D: 4, M: 4, F: 2 },
+};
+export const FORMATION_PRESETS = {
+  7: [[3, 2, 1], [2, 3, 1], [3, 1, 2], [2, 2, 2]],
+  9: [[3, 3, 2], [3, 2, 3], [2, 4, 2], [3, 4, 1], [4, 3, 1]],
+  11: [[4, 4, 2], [4, 3, 3], [3, 5, 2], [4, 5, 1], [3, 4, 3], [5, 3, 2]],
+};
+export const outfieldCount = (formation) => ROLES.reduce((a, r) => a + (formation[r] || 0), 0);
+export const formationLabel = (f) => `${f.D}-${f.M}-${f.F}`;
+
+// Named spots for a line of n players, left to right from the team's own goal.
+const LINE = { D: "B", M: "M", F: "F" };
+export function slotsFor(role, n) {
+  const suffix = LINE[role];
+  const width = { 1: ["C"], 2: ["L", "R"], 3: ["L", "C", "R"], 4: ["L", "LC", "RC", "R"], 5: ["L", "LC", "C", "RC", "R"], 6: ["L", "LC", "C", "C2", "RC", "R"] };
+  return (width[n] || width[5]).slice(0, n).map((w) => `${w}${suffix}`);
+}
+const SIDE_NAME = { L: "Left", R: "Right", C: "Center", LC: "Left-center", RC: "Right-center", C2: "Center" };
+const LINE_NAME = { B: "back", M: "mid", F: "forward" };
+export function slotName(code) {
+  const side = code.slice(0, -1), line = code.slice(-1);
+  return `${SIDE_NAME[side] || side} ${LINE_NAME[line] || line}`;
+}
 
 // Availability: p.out is null (plays the whole game), "absent", or the index
 // of the first segment the player misses after leaving early.
@@ -27,10 +55,6 @@ export function mulberry32(seed) {
   };
 }
 
-// Named positions within each role, listed left to right as seen from the
-// team's own goal.
-export const SLOTS = { F: ["LF", "RF"], M: ["LM", "CM", "RM"], D: ["LB", "CB", "RB"] };
-
 function shuffle(a, rnd) {
   const b = a.slice();
   for (let i = b.length - 1; i > 0; i--) {
@@ -42,7 +66,7 @@ function shuffle(a, rnd) {
 
 // Give every on-field player a named position. A player who stays on in the
 // same role keeps their spot; newcomers take the vacated spots at random.
-export function assignSlots(plans, seed) {
+export function assignSlots(plans, seed, formation) {
   const rnd = mulberry32(seed * 7 + 1);
   return plans.map((half) => {
     const out = [];
@@ -50,7 +74,7 @@ export function assignSlots(plans, seed) {
       const asg = {};
       for (const r of ROLES) {
         const names = Object.keys(seg).filter((n) => seg[n] === r);
-        const free = new Set(SLOTS[r]);
+        const free = new Set(slotsFor(r, formation[r]));
         const fresh = [];
         for (const n of names) {
           const prev = s > 0 && half[s - 1][n] === r ? out[s - 1][n] : null;
@@ -79,7 +103,14 @@ export function swapSlots(slots, h, s, slotA, slotB) {
 
 export function buildModel(players, cfg, rules, seed) {
   const rnd = mulberry32(seed);
+  const NEED = cfg.formation;
+  const FIELD = outfieldCount(NEED);
+  if (FIELD !== cfg.size - 1) return { reason: `The formation adds up to ${FIELD} but ${cfg.size}v${cfg.size} needs ${cfg.size - 1} on the field plus a goalie.` };
   const names = players.map((p) => p.name);
+  if (names.length === 0) return { reason: "Add your players first." };
+  if (names.some((n) => !n.trim())) return { reason: "Every player needs a name." };
+  if (new Set(names).size !== names.length) return { reason: "Two players have the same name." };
+  if (!cfg.gk1 || !cfg.gk2) return { reason: "Pick a goalie for each half." };
   const idx = Object.fromEntries(names.map((n, i) => [n, i]));
   const byName = Object.fromEntries(players.map((p) => [p.name, p]));
   const gkOf = (t) => (t < SEGS ? cfg.gk1 : cfg.gk2);
@@ -273,6 +304,7 @@ const segLabel = (t) => `${HALF_NAME[Math.floor(t / SEGS)]} ${SEG_TIMES[t % SEGS
 // solver would never break; notes are things the solver balances but a coach
 // may choose to override.
 export function checkLineup(plans, players, cfg, rules) {
+  const NEED = cfg.formation;
   const issues = [];
   const hard = (text) => issues.push({ level: "hard", text });
   const note = (text) => issues.push({ level: "note", text });

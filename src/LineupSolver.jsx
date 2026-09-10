@@ -1,11 +1,10 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import highsLoader from "highs";
 import highsWasmUrl from "highs/runtime?url";
-import { SEGS, SEG_LEN, ROLES, SLOTS, buildModel, available, assignSlots, swapSlots, checkLineup } from "./model.js";
+import { SEGS, SEG_LEN, ROLES, GAME_SIZES, DEFAULT_FORMATION, FORMATION_PRESETS, outfieldCount, formationLabel, slotsFor, slotName, buildModel, available, assignSlots, swapSlots, checkLineup } from "./model.js";
 
 // ---------- Constants ----------
 const SEG_LABEL = ["0–6", "6–12", "12–18", "18–25"];
-const SLOT_NAME = { LF: "Left forward", RF: "Right forward", LM: "Left mid", CM: "Center mid", RM: "Right mid", LB: "Left back", CB: "Center back", RB: "Right back" };
 const ROLE_NAME = { D: "Defense", M: "Mid", F: "Forward", GK: "In goal", B: "Bench", O: "Out" };
 const ROLE_PHRASE = { any: "on the field", D: "in defense", M: "in midfield", F: "at forward" };
 const RULE_TEMPLATES = [
@@ -31,32 +30,18 @@ const TINT = {
 const SETUP_KEY = "greyhounds-setup";
 const HISTORY_KEY = "greyhounds-history";
 
-const DEFAULT_PLAYERS = [
-  { name: "Michael", pref: "", never: ["D"] },
-  { name: "Ethan", pref: "", never: ["D", "F"] },
-  { name: "Drew", pref: "F", never: [] },
-  { name: "Isaac", pref: "F", never: [] },
-  { name: "Khalid", pref: "D", never: [] },
-  { name: "Theodore", pref: "D", never: ["F"] },
-  { name: "Ryan", pref: "D", never: [] },
-  { name: "Neil", pref: "D", never: [] },
-  { name: "Bobby", pref: "M", never: [] },
-  { name: "Piers", pref: "M", never: [] },
-  { name: "Arran", pref: "F", never: [] },
-  { name: "Adam", pref: "", never: ["D"] },
-  { name: "Lev", pref: "", never: [] },
-  { name: "William", pref: "", never: [] },
-].map((p) => ({ ...p, pref2: "", out: null }));
-
-const DEFAULT_RULES = [
-  { id: 1, type: "between", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", lo: 1, hi: 3 },
-];
-
+// First use starts empty: the coach adds players and constraints.
+const DEFAULT_PLAYERS = [];
+const DEFAULT_RULES = [];
+const DEFAULT_SIZE = 9;
 const DEFAULT_CFG = {
-  gk1: "Ethan", // goalie, first half
-  gk2: "Michael", // goalie, second half
+  gk1: "", // goalie, first half
+  gk2: "", // goalie, second half
   goalieFieldSegs: 2, // field segments each goalie gets in their off half
+  size: DEFAULT_SIZE, // players per side including the goalie
+  formation: { ...DEFAULT_FORMATION[DEFAULT_SIZE] },
 };
+const newPlayer = (name) => ({ name, pref: "", pref2: "", never: [], out: null });
 
 // ---------- Solver ----------
 // HiGHS (mixed-integer programming) compiled to WebAssembly. Loaded once.
@@ -82,10 +67,15 @@ function loadSetup(d) {
     name: p.name, pref: p.pref || "", pref2: p.pref2 || "", never: p.never || [], out: p.out ?? null,
   }));
   const c = d.cfg || {};
+  const size = GAME_SIZES.includes(c.size) ? c.size : DEFAULT_SIZE;
+  const f = c.formation || {};
+  const formation = ROLES.every((r) => Number.isInteger(f[r]) && f[r] >= 0) ? { D: f.D, M: f.M, F: f.F } : { ...DEFAULT_FORMATION[size] };
   const cfg = {
     gk1: c.gk1 ?? DEFAULT_CFG.gk1,
     gk2: c.gk2 ?? DEFAULT_CFG.gk2,
     goalieFieldSegs: DEFAULT_CFG.goalieFieldSegs,
+    size,
+    formation,
   };
   const rules = (d.rules || DEFAULT_RULES).map((r) => ({ ...r, role: r.role || "any" }));
   return { players, cfg, rules };
@@ -153,6 +143,8 @@ export default function LineupSolver() {
   const [openGame, setOpenGame] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [newName, setNewName] = useState("");
+  const setupImportRef = useRef(null);
   const [swapNote, setSwapNote] = useState(null); // minutes impact of the last manual swap
   const swapTimer = useRef(null);
   const [pick, setPick] = useState(null); // chip selected for a position swap
@@ -174,7 +166,7 @@ export default function LineupSolver() {
       console.error("solver failed", e);
       out = { reason: "The solver hit an unexpected error." };
     }
-    const slots = out.result ? assignSlots(out.result.plans, s) : null;
+    const slots = out.result ? assignSlots(out.result.plans, s, c.formation) : null;
     setSol({ result: out.result || null, slots, original: out.result ? { result: out.result, slots } : null, edited: false, reason: out.reason ?? null, players: p, cfg: c, rules: r });
     setPick(null);
     setSolving(false);
@@ -215,6 +207,51 @@ export default function LineupSolver() {
     try { window.localStorage.removeItem(SETUP_KEY); } catch (e) { /* ignore */ }
     flash("Setup cleared");
   };
+  const exportSetup = () => {
+    const blob = new Blob([JSON.stringify({ players, cfg, rules }, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `greyhounds-setup-${todayISO()}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const importSetup = (file) => {
+    if (!file) return;
+    file.text().then((text) => {
+      try {
+        const d = loadSetup(JSON.parse(text));
+        if (!Array.isArray(d.players)) throw new Error("bad");
+        setPlayers(d.players);
+        setCfg(d.cfg);
+        setRules(d.rules);
+        flash(`Imported ${d.players.length} players`);
+      } catch (e) {
+        flash("That file isn't a setup export");
+      }
+    });
+  };
+  const addPlayer = (name) => {
+    const n = name.trim();
+    if (!n || players.some((p) => p.name === n)) return false;
+    setPlayers([...players, newPlayer(n)]);
+    return true;
+  };
+  const removePlayer = (i) => {
+    const gone = players[i].name;
+    setPlayers(players.filter((_, j) => j !== i));
+    setRules(rules.map((r) => ({ ...r, players: r.players.filter((n) => n !== gone) })));
+    setCfg({ ...cfg, gk1: cfg.gk1 === gone ? "" : cfg.gk1, gk2: cfg.gk2 === gone ? "" : cfg.gk2 });
+  };
+  const renamePlayer = (i, name) => {
+    const old = players[i].name;
+    setPlayers(players.map((p, j) => (j === i ? { ...p, name } : p)));
+    setRules(rules.map((r) => ({ ...r, players: r.players.map((n) => (n === old ? name : n)) })));
+    setCfg({ ...cfg, gk1: cfg.gk1 === old ? name : cfg.gk1, gk2: cfg.gk2 === old ? name : cfg.gk2 });
+  };
+  const setSize = (size) => setCfg({ ...cfg, size, formation: { ...DEFAULT_FORMATION[size] } });
+  const setFormation = (formation) => setCfg({ ...cfg, formation });
+  const formationTotal = outfieldCount(cfg.formation);
+  const formationOk = formationTotal === cfg.size - 1;
   const saveHistory = (h) => {
     setHistory(h);
     if (!writeJSON(HISTORY_KEY, h)) flash("Couldn't save history on this device");
@@ -309,10 +346,6 @@ export default function LineupSolver() {
   };
   const addRule = (type) => {
     setRules([...rules, { id: Date.now() + Math.random(), type, players: [], role: "any", n: type === "atMost" ? 2 : 1, lo: 1, hi: 3 }]);
-    setPicker(false);
-  };
-  const restoreDefaults = () => {
-    setRules(DEFAULT_RULES);
     setPicker(false);
   };
 
@@ -463,7 +496,7 @@ export default function LineupSolver() {
         onDragStart={interactive ? (e) => { setPick({ h, s, name }); e.dataTransfer.effectAllowed = "move"; } : undefined}
         onDragOver={interactive ? (e) => { if (sameRow) e.preventDefault(); } : undefined}
         onDrop={interactive ? (e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, name); } : undefined}
-        title={interactive ? `${SLOT_NAME[slot]} — tap or drag onto another player in this segment to swap` : SLOT_NAME[slot]}
+        title={interactive ? `${slotName(slot)} — tap or drag onto another player in this segment to swap` : slotName(slot)}
         className={`rounded-md text-slate-900 text-center leading-tight shadow-sm ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameRow && interactive ? "ring-2 ring-white/70" : ""}`}>
         <span className="block font-semibold">{name}</span>
         <span className="block text-slate-500">{slot}</span>
@@ -481,7 +514,8 @@ export default function LineupSolver() {
     const bench = snap.players
       .filter((p) => seg[p.name] === undefined && p.name !== gk && available(p, t))
       .map((p) => p.name).sort();
-    const row = (r) => SLOTS[r].map((slot) => {
+    const formation = snap.cfg.formation || DEFAULT_FORMATION[DEFAULT_SIZE];
+    const row = (r) => slotsFor(r, formation[r]).map((slot) => {
       const name = Object.keys(sl).find((n) => sl[n] === slot);
       return name ? chip(name, slot, h, s, interactive, compact, sub) : <div key={slot} className="min-w-[3rem]" />;
     });
@@ -621,6 +655,13 @@ export default function LineupSolver() {
           <div>
             <h1 className="text-3xl font-extrabold tracking-tight text-emerald-950">Greyhounds lineup solver</h1>
             <p className="text-slate-600 mt-1">Eight segments, subs at 6:00, 12:00 and 18:00. Change any constraint and re-solve.</p>
+            <div className="mt-2 inline-flex rounded-lg border border-slate-300 bg-white overflow-hidden text-sm">
+              {GAME_SIZES.map((n) => (
+                <button key={n} onClick={() => setSize(n)}
+                  className={`px-3 py-1.5 font-semibold ${cfg.size === n ? "bg-emerald-900 text-white" : "text-slate-700 hover:bg-slate-100"}`}>{n}v{n}</button>
+              ))}
+              <span className="px-3 py-1.5 text-slate-500 border-l border-slate-200">{formationLabel(cfg.formation)} + GK</span>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2 items-center">
             {note && <span className="text-sm text-emerald-700">{note}</span>}
@@ -682,7 +723,11 @@ export default function LineupSolver() {
                 {!sol && !solving && (
                   <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-slate-600">
                     <p className="font-semibold text-slate-800">No lineup yet.</p>
-                    <p className="text-sm mt-1 mb-3">Mark anyone who's out, check the goalies, then solve.</p>
+                    <p className="text-sm mt-1 mb-3">
+                      {players.length === 0
+                        ? "Add your players on the right (or import a setup another coach exported), pick goalies, then solve."
+                        : "Mark anyone who's out, check the goalies, then solve."}
+                    </p>
                     <button onClick={() => run(seed)} className={primary}>Solve</button>
                   </div>
                 )}
@@ -798,7 +843,7 @@ export default function LineupSolver() {
                         <span className="font-bold text-emerald-950">{g.label || "Game"}</span>
                         <span className="text-slate-500 text-sm ml-2">{g.date}</span>
                         <span className="block text-xs text-slate-500">
-                          {g.cfg.gk1} then {g.cfg.gk2} in goal
+                          {g.cfg.size ? `${g.cfg.size}v${g.cfg.size} ${formationLabel(g.cfg.formation)} · ` : ""}{g.cfg.gk1} then {g.cfg.gk2} in goal
                           {g.players.some((p) => p.out) && ` · out: ${g.players.filter((p) => p.out).map((p) => p.name).join(", ")}`}
                         </span>
                       </button>
@@ -843,18 +888,32 @@ export default function LineupSolver() {
           {/* ---------- Setup ---------- */}
           <div className="space-y-5">
             <section className="bg-white rounded-xl border border-slate-200 p-4">
-              <h2 className="font-bold text-emerald-950 mb-1">Players</h2>
-              <p className="text-xs text-slate-500 mb-2">First and second choice of position nudge the solver (second counts half); Never is a hard rule. Mark anyone absent or leaving early.</p>
+              <div className="flex items-center justify-between mb-1">
+                <h2 className="font-bold text-emerald-950">Players</h2>
+                <div className="flex gap-1">
+                  <button onClick={exportSetup} disabled={players.length === 0} className={`${btn} text-xs py-1 px-2`} title="Download players, goalies, formation and constraints as a file to share with another coach">Export</button>
+                  <button onClick={() => setupImportRef.current?.click()} className={`${btn} text-xs py-1 px-2`}>Import</button>
+                  <input ref={setupImportRef} type="file" accept="application/json" className="hidden"
+                    onChange={(e) => { importSetup(e.target.files?.[0]); e.target.value = ""; }} />
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mb-2">First and second choice of position nudge the solver (second counts half); Never is a hard rule. Mark anyone absent or leaving early. Tap a name to edit it.</p>
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-slate-500">
-                    <th className="text-left py-1">Name</th><th>1st</th><th>2nd</th><th>Never</th><th>Status</th>
+                    <th className="text-left py-1">Name</th><th>1st</th><th>2nd</th><th>Never</th><th>Status</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
+                  {players.length === 0 && (
+                    <tr><td colSpan={6} className="py-3 text-center text-slate-400">No players yet.</td></tr>
+                  )}
                   {players.map((p, i) => (
                     <tr key={i} className={`border-t border-slate-100 ${p.out ? "text-slate-400" : ""}`}>
-                      <td className="py-1 font-medium">{p.name}</td>
+                      <td className="py-1 font-medium">
+                        <input value={p.name} onChange={(e) => renamePlayer(i, e.target.value)}
+                          className="w-20 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-emerald-700 focus:outline-none px-0.5" />
+                      </td>
                       {["pref", "pref2"].map((k) => (
                         <td key={k} className="text-center">
                           <select value={p[k]} onChange={(e) => setPlayer(i, { [k]: e.target.value })}
@@ -879,10 +938,47 @@ export default function LineupSolver() {
                           {OUT_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                         </select>
                       </td>
+                      <td className="text-center">
+                        <button onClick={() => removePlayer(i)} className="text-slate-300 hover:text-red-600 px-1" title="Remove player">✕</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              <form className="mt-2 flex gap-1" onSubmit={(e) => { e.preventDefault(); if (addPlayer(newName)) setNewName(""); }}>
+                <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Add a player"
+                  className="flex-1 border border-slate-300 rounded-md px-2 py-1 text-sm bg-white" />
+                <button type="submit" disabled={!newName.trim() || players.some((p) => p.name === newName.trim())}
+                  className="px-3 py-1 rounded-md bg-emerald-900 text-white text-sm font-medium hover:bg-emerald-800 disabled:opacity-40">Add</button>
+              </form>
+              <p className="text-[11px] text-slate-400 mt-1">{players.length} players · {cfg.size}v{cfg.size} needs {cfg.size} on the field per segment</p>
+            </section>
+
+            <section className="bg-white rounded-xl border border-slate-200 p-4">
+              <h2 className="font-bold text-emerald-950 mb-1">Formation</h2>
+              <p className="text-xs text-slate-500 mb-2">Defenders, midfielders and forwards for {cfg.size}v{cfg.size}. The goalie is extra.</p>
+              <div className="flex flex-wrap gap-1 mb-2">
+                {FORMATION_PRESETS[cfg.size].map(([D, M, F]) => {
+                  const on = cfg.formation.D === D && cfg.formation.M === M && cfg.formation.F === F;
+                  return (
+                    <button key={`${D}${M}${F}`} onClick={() => setFormation({ D, M, F })}
+                      className={`px-2 py-1 rounded-md border text-sm font-semibold ${on ? "bg-emerald-900 text-white border-emerald-900" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-100"}`}>{D}-{M}-{F}</button>
+                  );
+                })}
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                {ROLES.map((r) => (
+                  <label key={r} className="flex items-center gap-1">
+                    <span className="text-slate-500">{ROLE_NAME[r]}</span>
+                    <input type="number" min={0} max={6} value={cfg.formation[r]}
+                      onChange={(e) => setFormation({ ...cfg.formation, [r]: Math.max(0, +e.target.value || 0) })}
+                      className="w-12 border border-slate-300 rounded px-1 py-0.5" />
+                  </label>
+                ))}
+              </div>
+              {!formationOk && (
+                <p className="text-xs text-red-700 mt-2">That adds up to {formationTotal}; {cfg.size}v{cfg.size} needs {cfg.size - 1} on the field plus the goalie.</p>
+              )}
             </section>
 
             <section className="bg-white rounded-xl border border-slate-200 p-4">
@@ -892,7 +988,8 @@ export default function LineupSolver() {
                   <label key={k} className="flex items-center justify-between gap-2">
                     <span>{i === 0 ? "First half in goal" : "Second half in goal"}</span>
                     <select value={cfg[k]} onChange={(e) => setCfg({ ...cfg, [k]: e.target.value })}
-                      className="border border-slate-300 rounded-md px-2 py-1 bg-white">
+                      className={`border rounded-md px-2 py-1 bg-white ${cfg[k] ? "border-slate-300" : "border-red-300"}`}>
+                      <option value="">Pick a goalie</option>
                       {players.map((p) => <option key={p.name} value={p.name}>{p.name}{p.out ? " (out)" : ""}</option>)}
                     </select>
                   </label>
@@ -921,11 +1018,6 @@ export default function LineupSolver() {
                       <span className="block text-xs text-slate-500">{t.desc}</span>
                     </button>
                   ))}
-                  <button onClick={restoreDefaults}
-                    className="w-full text-left rounded-md border border-slate-200 bg-white hover:bg-emerald-100 px-2.5 py-2">
-                    <span className="font-semibold">Restore the Greyhounds defaults</span>
-                    <span className="block text-xs text-slate-500">Replace the current list with the standard set of constraints.</span>
-                  </button>
                 </div>
               )}
 
@@ -937,9 +1029,9 @@ export default function LineupSolver() {
                   <div key={r.id} className="border border-slate-200 rounded-lg p-2.5 bg-stone-50">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="font-medium">
-                        {r.type === "between" && <>Between {numInput(r, 0, 8, "lo")} and {numInput(r, 0, 8, "hi")} of these {roleSelect(r)}</>}
-                        {r.type === "atMost" && <>At most {numInput(r, 0, 8)} of these {roleSelect(r)}</>}
-                        {r.type === "atLeast" && <>At least {numInput(r, 1, 8)} of these {roleSelect(r)}</>}
+                        {r.type === "between" && <>Between {numInput(r, 0, 11, "lo")} and {numInput(r, 0, 11, "hi")} of these {roleSelect(r)}</>}
+                        {r.type === "atMost" && <>At most {numInput(r, 0, 11)} of these {roleSelect(r)}</>}
+                        {r.type === "atLeast" && <>At least {numInput(r, 1, 11)} of these {roleSelect(r)}</>}
                         {r.type === "notBoth" && <>Never two of these together {roleSelect(r)}</>}
                       </span>
                       <button onClick={() => setRules(rules.filter((x) => x.id !== r.id))}
