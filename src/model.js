@@ -1,12 +1,22 @@
 // Integer-programming model for the lineup problem.
 // buildModel() turns the setup into an LP-format string for HiGHS and returns
 // a decoder that maps the solved variables back into per-segment lineups.
+// When the setup can be ruled out before solving, it returns { reason }.
 
 export const SEGS = 4; // per half
 export const SEG_LEN = [6, 6, 6, 7]; // minutes
 export const ROLES = ["D", "M", "F"];
 export const NEED = { D: 3, M: 3, F: 2 };
-const T = 2 * SEGS; // segments in the game
+export const T = 2 * SEGS; // segments in the game
+const FIELD = ROLES.reduce((a, r) => a + NEED[r], 0); // players on the field
+
+// Availability: p.out is null (plays the whole game), "absent", or the index
+// of the first segment the player misses after leaving early.
+export function available(p, t) {
+  if (p.out == null) return true;
+  if (p.out === "absent") return false;
+  return t < p.out;
+}
 
 function mulberry32(seed) {
   return function () {
@@ -24,17 +34,61 @@ export function buildModel(players, cfg, rules, seed) {
   const byName = Object.fromEntries(players.map((p) => [p.name, p]));
   const gkOf = (t) => (t < SEGS ? cfg.gk1 : cfg.gk2);
   const isGoalie = (n) => n === cfg.gk1 || n === cfg.gk2;
-  const gSegs = cfg.goalieFieldSegs;
+  const inNet = (n, t) => n === gkOf(t);
+
+  // Goalies must be there for their half in net.
+  for (const g of [cfg.gk1, cfg.gk2]) {
+    if (!byName[g]) return { reason: `${g} is not on the roster.` };
+    const half = g === cfg.gk1 ? 0 : 1;
+    for (let s = 0; s < SEGS; s++) {
+      if (!available(byName[g], half * SEGS + s)) return { reason: `${g} is in goal for the ${half === 0 ? "first" : "second"} half but is marked out.` };
+    }
+  }
+
+  // Who can be on the field when.
+  const onField = (n, t) => !inNet(n, t) && available(byName[n], t);
+  const canPlay = (n, t, r) => onField(n, t) && !(byName[n].never || []).includes(r);
+
+  // Playing-time targets. Field slots left after the goalies' field segments
+  // are shared among outfielders in proportion to how much of the game each
+  // one is here for; everyone lands within one segment of their share.
+  const target = {};
+  const avail = {};
+  for (const n of names) {
+    let k = 0;
+    for (let t = 0; t < T; t++) if (onField(n, t)) k++;
+    avail[n] = k;
+  }
+  let slots = FIELD * T;
+  const goalies = [cfg.gk1, cfg.gk2];
+  for (const g of goalies) {
+    const want = Math.min(cfg.goalieFieldSegs, avail[g]);
+    target[g] = { lo: want, hi: want };
+    slots -= want;
+  }
+  const outfield = names.filter((n) => !isGoalie(n));
+  const totalAvail = outfield.reduce((a, n) => a + avail[n], 0);
+  // Short-handed: goalies pick up extra field segments before giving up.
+  while (totalAvail < slots) {
+    const g = goalies.find((n) => target[n].hi < avail[n]);
+    if (!g) return { reason: "Not enough players to fill the field for every segment." };
+    target[g].lo++;
+    target[g].hi++;
+    slots--;
+  }
+  for (const n of outfield) {
+    const share = totalAvail ? (slots * avail[n]) / totalAvail : 0;
+    target[n] = { lo: Math.floor(share), hi: Math.min(avail[n], Math.ceil(share)) };
+  }
+  for (let t = 0; t < T; t++) {
+    if (names.filter((n) => onField(n, t)).length < FIELD) return { reason: "Not enough players to fill the field for every segment." };
+  }
 
   const cons = [];
   const obj = [];
   const bins = new Set();
   const x = (n, t, r) => `x_${idx[n]}_${t}_${r}`;
   const y = (n, t) => `y_${idx[n]}_${t}`;
-
-  // Which (player, segment, role) triples are even possible.
-  const canPlay = (n, t, r) => n !== gkOf(t) && !(byName[n].never || []).includes(r);
-  const onField = (n, t) => n !== gkOf(t);
 
   // y = sum of x over roles; objective favours preferred roles with a
   // seeded jitter so different seeds explore different optimal lineups.
@@ -48,6 +102,7 @@ export function buildModel(players, cfg, rules, seed) {
       const w = (byName[n].pref === r ? 1 : 0) + 0.001 * rnd();
       obj.push(`${w.toFixed(4)} ${x(n, t, r)}`);
     }
+    if (terms.length === 0) return { reason: `${n} has every position marked Never.` };
     bins.add(y(n, t));
     cons.push(`${terms.join(" + ")} - ${y(n, t)} = 0`);
   }
@@ -55,39 +110,44 @@ export function buildModel(players, cfg, rules, seed) {
   // Formation each segment.
   for (let t = 0; t < T; t++) for (const r of ROLES) {
     const terms = names.filter((n) => canPlay(n, t, r)).map((n) => x(n, t, r));
+    if (terms.length < NEED[r]) return { reason: `Not enough players allowed at ${r} to fill the formation.` };
     cons.push(`${terms.join(" + ")} = ${NEED[r]}`);
   }
 
   // Playing time.
   for (const n of names) {
-    if (isGoalie(n)) {
-      const off = n === cfg.gk1 ? 1 : 0; // half in which this goalie is on the field
-      const ts = [];
-      for (let s = 0; s < SEGS; s++) ts.push(off * SEGS + s);
-      cons.push(`${ts.map((t) => y(n, t)).join(" + ")} = ${gSegs}`);
-      if (gSegs >= 2) for (let s = 0; s < SEGS - 1; s++) {
-        const t = off * SEGS + s;
-        cons.push(`${y(n, t)} + ${y(n, t + 1)} >= 1`);
-      }
-    } else {
-      const all = [];
-      for (let t = 0; t < T; t++) all.push(y(n, t));
-      // Everyone gets at least 5 of 8; the cap of 3 per half keeps it at 6 at most.
-      // z marks a sixth segment. Charging it back at the preference weight keeps
-      // the solver from handing extra minutes to whoever has a preference set.
+    const ts = [];
+    for (let t = 0; t < T; t++) if (onField(n, t)) ts.push(t);
+    if (ts.length === 0) continue;
+    const all = ts.map((t) => y(n, t)).join(" + ");
+    const { lo, hi } = target[n];
+    cons.push(`${all} >= ${lo}`);
+    if (hi > lo) {
+      // z marks the extra segment. Charging it back at the preference weight
+      // keeps the solver from handing extra minutes to whoever has a
+      // preference set.
       const z = `z_${idx[n]}`;
       bins.add(z);
-      cons.push(`${all.join(" + ")} >= 5`);
-      cons.push(`${all.join(" + ")} - ${z} <= 5`);
+      cons.push(`${all} - ${z} <= ${lo}`);
       if (byName[n].pref) obj.push(`-1 ${z}`);
-      for (let h = 0; h < 2; h++) {
-        const half = [];
-        for (let s = 0; s < SEGS; s++) half.push(y(n, h * SEGS + s));
-        cons.push(`${half.join(" + ")} >= 2`);
-        cons.push(`${half.join(" + ")} <= 3`);
+    } else {
+      cons.push(`${all} <= ${hi}`);
+    }
+    // Never sit twice in a row (including across halftime) while here.
+    // Skipped for anyone whose share is too small to make that possible,
+    // such as a goalie getting a single field segment.
+    if (hi >= Math.floor(ts.length / 2)) {
+      for (let t = 0; t < T - 1; t++) {
+        if (onField(n, t) && onField(n, t + 1)) cons.push(`${y(n, t)} + ${y(n, t + 1)} >= 1`);
       }
-      // Never sit twice in a row, including across halftime.
-      for (let t = 0; t < T - 1; t++) cons.push(`${y(n, t)} + ${y(n, t + 1)} >= 1`);
+    }
+    // Outfielders here for the whole game split their time evenly across halves.
+    if (!isGoalie(n) && ts.length === T) {
+      const h1 = [], h2 = [];
+      for (let s = 0; s < SEGS; s++) { h1.push(y(n, s)); h2.push(y(n, SEGS + s)); }
+      const diff = `${h1.join(" + ")} - ${h2.join(" - ")}`;
+      cons.push(`${diff} <= 1`);
+      cons.push(`${diff} >= -1`);
     }
   }
 
@@ -104,12 +164,16 @@ export function buildModel(players, cfg, rules, seed) {
   // Coach constraints, applied to every segment.
   for (const rule of rules) for (let t = 0; t < T; t++) {
     const terms = rule.players
-      .filter((n) => n in idx && onField(n, t) && (rule.role === "any" || canPlay(n, t, rule.role)))
+      .filter((n) => n in idx && (rule.role === "any" ? onField(n, t) : canPlay(n, t, rule.role)))
       .map((n) => (rule.role === "any" ? y(n, t) : x(n, t, rule.role)));
-    const lhs = terms.length ? terms.join(" + ") : null;
-    if (rule.type === "atMost") { if (lhs) cons.push(`${lhs} <= ${rule.n}`); }
-    else if (rule.type === "atLeast") { cons.push(`${lhs || "0 " + y(names[0], names[0] === gkOf(t) ? (t + SEGS) % T : t)} >= ${rule.n}`); }
-    else if (rule.type === "notBoth") { if (lhs) cons.push(`${lhs} <= 1`); }
+    if (rule.type === "atMost") {
+      if (terms.length > rule.n) cons.push(`${terms.join(" + ")} <= ${rule.n}`);
+    } else if (rule.type === "atLeast") {
+      if (terms.length < rule.n) return { reason: "An anchor constraint needs more eligible players than are available in some segment." };
+      cons.push(`${terms.join(" + ")} >= ${rule.n}`);
+    } else if (rule.type === "notBoth") {
+      if (terms.length >= 2) cons.push(`${terms.join(" + ")} <= 1`);
+    }
   }
 
   const lp = [

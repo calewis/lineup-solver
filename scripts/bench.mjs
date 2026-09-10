@@ -1,32 +1,45 @@
+// node scripts/bench.mjs — solve a few setups and report timing and fairness.
 import highsLoader from "highs";
-import { buildModel } from "../src/model.js";
-const PLAYERS = [
-  { name: "Michael", pref: "", never: ["D"] }, { name: "Ethan", pref: "", never: ["D","F"] },
-  { name: "Drew", pref: "F", never: [] }, { name: "Isaac", pref: "F", never: [] },
-  { name: "Khalid", pref: "D", never: [] }, { name: "Theodore", pref: "D", never: ["F"] },
-  { name: "Ryan", pref: "D", never: [] }, { name: "Neil", pref: "D", never: [] },
-  { name: "Bobby", pref: "M", never: [] }, { name: "Piers", pref: "M", never: [] },
-  { name: "Arran", pref: "F", never: [] }, { name: "Adam", pref: "", never: ["D"] },
-  { name: "Lev", pref: "", never: [] }, { name: "William", pref: "", never: [] },
-];
+import { buildModel, available, T } from "../src/model.js";
+const roster = [
+  ["Michael", "", ["D"]], ["Ethan", "", ["D", "F"]], ["Drew", "F", []], ["Isaac", "F", []],
+  ["Khalid", "D", []], ["Theodore", "D", ["F"]], ["Ryan", "D", []], ["Neil", "D", []],
+  ["Bobby", "M", []], ["Piers", "M", []], ["Arran", "F", []], ["Adam", "", ["D"]],
+  ["Lev", "", []], ["William", "", []],
+].map(([name, pref, never]) => ({ name, pref, never, out: null }));
 const RULES = [
-  { id: 1, type: "atLeast", players: ["Drew","Isaac","Khalid","Theodore"], role: "any", n: 1 },
-  { id: 2, type: "atMost", players: ["Drew","Isaac","Khalid","Theodore"], role: "any", n: 3 },
-  { id: 3, type: "atMost", players: ["Adam","William","Lev"], role: "M", n: 2 },
-  { id: 4, type: "atLeast", players: ["Ryan","Theodore","Khalid"], role: "D", n: 1 },
-  { id: 5, type: "notBoth", players: ["Lev","Adam"], role: "D", n: 1 },
+  { id: 1, type: "atLeast", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 1 },
+  { id: 2, type: "atMost", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 3 },
+  { id: 3, type: "atMost", players: ["Adam", "William", "Lev"], role: "M", n: 2 },
+  { id: 4, type: "atLeast", players: ["Ryan", "Theodore", "Khalid"], role: "D", n: 1 },
+  { id: 5, type: "notBoth", players: ["Lev", "Adam"], role: "D", n: 1 },
+];
+const cfg = { gk1: "Ethan", gk2: "Michael", goalieFieldSegs: 2 };
+const withOut = (edits) => roster.map((p) => ({ ...p, out: edits[p.name] ?? null }));
+const cases = [
+  ["full roster", roster, cfg],
+  ["only 9 players, no rules", withOut({ Bobby: "absent", Piers: "absent", Lev: "absent", Adam: "absent", William: "absent" }), cfg, []],
+  ["Bobby absent", withOut({ Bobby: "absent" }), cfg],
+  ["Bobby + Piers absent", withOut({ Bobby: "absent", Piers: "absent" }), cfg],
+  ["Drew leaves at halftime", withOut({ Drew: 4 }), cfg],
+  ["Neil absent, Lev leaves 12:00 H2", withOut({ Neil: "absent", Lev: 6 }), cfg],
+  ["goalie absent", withOut({ Michael: "absent" }), cfg],
+  ["only 9 players", withOut({ Bobby: "absent", Piers: "absent", Lev: "absent", Adam: "absent", William: "absent" }), cfg],
 ];
 const highs = await highsLoader();
-for (const [label, cfg] of [["2 goalie segs", { gk1:"Ethan", gk2:"Michael", goalieFieldSegs:2 }], ["1 goalie seg", { gk1:"Ethan", gk2:"Michael", goalieFieldSegs:1 }]]) {
-  for (const seed of [7, 8]) {
-    const { lp, decode } = buildModel(PLAYERS, cfg, RULES, seed);
-    const t0 = performance.now();
-    const res = highs.solve(lp);
-    const ms = (performance.now() - t0).toFixed(0);
-    if (res.Status !== "Optimal") { console.log(label, seed, res.Status, ms + "ms"); continue; }
-    const { plans, score } = decode(res.Columns);
-    const prefCount = PLAYERS.filter(p => p.pref).length * 5;
-    console.log(`${label} seed ${seed}: ${ms}ms, pref matches ${score} of ${prefCount} possible`);
-    console.log("  H1 seg0:", JSON.stringify(plans[0][0]));
-  }
+for (const [label, players, c, rules = RULES] of cases) {
+  const m = buildModel(players, c, rules, 7);
+  if (m.reason) { console.log(`${label}: ${m.reason}`); continue; }
+  const t0 = performance.now();
+  const res = highs.solve(m.lp);
+  const ms = (performance.now() - t0).toFixed(0);
+  if (res.Status !== "Optimal") { console.log(`${label}: ${res.Status} (${ms}ms)`); continue; }
+  const { plans, score } = m.decode(res.Columns);
+  const segs = {};
+  let possible = 0;
+  for (const p of players) { segs[p.name] = 0; }
+  for (let t = 0; t < T; t++) for (const [n, r] of Object.entries(plans[Math.floor(t / 4)][t % 4])) { segs[n]++; }
+  for (const p of players) if (p.pref && !(p.name === c.gk1 || p.name === c.gk2)) possible += segs[p.name];
+  const line = players.filter((p) => !(p.name === c.gk1 || p.name === c.gk2)).map((p) => `${p.name.slice(0, 3)}${segs[p.name]}`).join(" ");
+  console.log(`${label}: ${ms}ms, prefs ${score}/${possible}, segs: ${line}`);
 }

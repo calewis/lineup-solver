@@ -1,16 +1,22 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import highsLoader from "highs";
 import highsWasmUrl from "highs/runtime?url";
-import { SEGS, SEG_LEN, ROLES, buildModel } from "./model.js";
+import { SEGS, SEG_LEN, ROLES, T, buildModel, available } from "./model.js";
 
 // ---------- Constants ----------
 const SEG_LABEL = ["0–6", "6–12", "12–18", "18–25"];
-const ROLE_NAME = { D: "Defense", M: "Mid", F: "Forward", GK: "In goal", B: "Bench" };
+const ROLE_NAME = { D: "Defense", M: "Mid", F: "Forward", GK: "In goal", B: "Bench", O: "Out" };
 const ROLE_PHRASE = { any: "on the field", D: "in defense", M: "in midfield", F: "at forward" };
 const RULE_TEMPLATES = [
   { type: "atMost", label: "Cap", desc: "At most N of these players at a position (or on the field at all)." },
   { type: "atLeast", label: "Anchor", desc: "At least N of these players at a position (or on the field at all)." },
   { type: "notBoth", label: "Keep apart", desc: "Never two of these players together at a position." },
+];
+// Availability choices. The value is the first segment the player misses.
+const OUT_OPTIONS = [
+  ["", "Playing"], ["absent", "Absent"],
+  ["1", "Leaves 6:00"], ["2", "Leaves 12:00"], ["3", "Leaves 18:00"], ["4", "Leaves at halftime"],
+  ["5", "Leaves 31:00"], ["6", "Leaves 37:00"], ["7", "Leaves 43:00"],
 ];
 const TINT = {
   D: "bg-blue-100 border-blue-200 text-slate-800",
@@ -18,7 +24,10 @@ const TINT = {
   F: "bg-amber-100 border-amber-200 text-slate-800",
   GK: "bg-slate-800 border-slate-800 text-white",
   B: "bg-transparent border-slate-200 text-slate-400",
+  O: "bg-transparent border-transparent text-slate-300 line-through",
 };
+const SETUP_KEY = "greyhounds-setup";
+const HISTORY_KEY = "greyhounds-history";
 
 const DEFAULT_PLAYERS = [
   { name: "Michael", pref: "", never: ["D"] },
@@ -35,7 +44,7 @@ const DEFAULT_PLAYERS = [
   { name: "Adam", pref: "", never: ["D"] },
   { name: "Lev", pref: "", never: [] },
   { name: "William", pref: "", never: [] },
-];
+].map((p) => ({ ...p, out: null }));
 
 const DEFAULT_RULES = [
   { id: 1, type: "atLeast", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 1 },
@@ -59,46 +68,73 @@ function getHighs() {
   return highsPromise;
 }
 
-// Returns { plans, score } or null when no lineup satisfies the constraints.
+// Returns { result } or { reason } when no lineup satisfies the setup.
 async function solve(players, cfg, rules, seed) {
+  const model = buildModel(players, cfg, rules, seed);
+  if (model.reason) return { reason: model.reason };
   const highs = await getHighs();
-  const { lp, decode } = buildModel(players, cfg, rules, seed);
-  const res = highs.solve(lp);
-  if (res.Status !== "Optimal") return null;
-  return decode(res.Columns);
+  const res = highs.solve(model.lp);
+  if (res.Status !== "Optimal") return { reason: "" };
+  return { result: model.decode(res.Columns) };
 }
 
-// ---------- Setup persistence ----------
+// ---------- Persistence ----------
 function loadSetup(d) {
   const players = (d.players || DEFAULT_PLAYERS).map((p) => ({
-    name: p.name, pref: p.pref || "", never: p.never || [],
+    name: p.name, pref: p.pref || "", never: p.never || [], out: p.out ?? null,
   }));
   const c = d.cfg || {};
   const cfg = {
     gk1: c.gk1 ?? DEFAULT_CFG.gk1,
     gk2: c.gk2 ?? DEFAULT_CFG.gk2,
-    goalieFieldSegs: c.goalieFieldSegs ?? DEFAULT_CFG.goalieFieldSegs,
+    goalieFieldSegs: DEFAULT_CFG.goalieFieldSegs,
   };
   const rules = (d.rules || DEFAULT_RULES).map((r) => ({ ...r, role: r.role || "any" }));
   return { players, cfg, rules };
 }
+function readJSON(key) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+function writeJSON(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 // ---------- Derived views ----------
-function minutesFor(sol, players, cfg) {
+function minutesFor(result, players, cfg) {
   const rows = {};
   for (const p of players) rows[p.name] = { min: 0, roles: {} };
   for (let h = 0; h < 2; h++) {
     const gk = h === 0 ? cfg.gk1 : cfg.gk2;
     for (let s = 0; s < SEGS; s++) {
-      rows[gk].min += SEG_LEN[s];
-      rows[gk].roles["GK"] = (rows[gk].roles["GK"] || 0) + 1;
-      for (const [n, r] of Object.entries(sol.plans[h][s])) {
+      if (rows[gk]) {
+        rows[gk].min += SEG_LEN[s];
+        rows[gk].roles["GK"] = (rows[gk].roles["GK"] || 0) + 1;
+      }
+      for (const [n, r] of Object.entries(result.plans[h][s])) {
+        if (!rows[n]) continue;
         rows[n].min += SEG_LEN[s];
         rows[n].roles[r] = (rows[n].roles[r] || 0) + 1;
       }
     }
   }
   return rows;
+}
+function rolesText(roles) {
+  return Object.entries(roles).map(([k, v]) => `${v} ${ROLE_NAME[k].toLowerCase()}`).join(", ");
+}
+function todayISO() {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }
 
 // ---------- UI ----------
@@ -108,57 +144,127 @@ export default function LineupSolver() {
   const [rules, setRules] = useState(DEFAULT_RULES);
   const [seed, setSeed] = useState(7);
   const [sol, setSol] = useState(null);
-  const [failed, setFailed] = useState(false);
   const [tab, setTab] = useState(0);
-  const [savedNote, setSavedNote] = useState("");
+  const [note, setNote] = useState("");
   const [picker, setPicker] = useState(false);
   const [solving, setSolving] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [commitOpen, setCommitOpen] = useState(false);
+  const [commitLabel, setCommitLabel] = useState("");
+  const [commitDate, setCommitDate] = useState(todayISO());
+  const [openGame, setOpenGame] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const importRef = useRef(null);
+
+  const flash = (msg) => {
+    setNote(msg);
+    setTimeout(() => setNote(""), 2500);
+  };
 
   // A solution remembers the exact inputs it was built from. If any of them
   // change, the solution is stale and disappears until the coach re-solves.
   const solveWith = async (p, c, r, s) => {
     setSolving(true);
-    let result = null;
+    let out;
     try {
-      result = await solve(p, c, r, s);
+      out = await solve(p, c, r, s);
     } catch (e) {
       console.error("solver failed", e);
+      out = { reason: "The solver hit an unexpected error." };
     }
-    setSol({ result, players: p, cfg: c, rules: r });
-    setFailed(!result);
+    setSol({ result: out.result || null, reason: out.reason ?? null, players: p, cfg: c, rules: r });
     setSolving(false);
   };
   const run = (s = seed) => solveWith(players, cfg, rules, s);
   const stale = !!sol && (sol.players !== players || sol.cfg !== cfg || sol.rules !== rules);
   const result = sol && !stale ? sol.result : null;
+  const failReason = sol && !stale && !sol.result ? sol.reason : null;
 
+  // Restore a saved setup and history. Only a saved setup gets solved on load;
+  // otherwise the coach starts from a blank slate and presses Solve.
   useEffect(() => {
-    let d = { players: DEFAULT_PLAYERS, cfg: DEFAULT_CFG, rules: DEFAULT_RULES };
-    try {
-      const saved = window.localStorage.getItem("greyhounds-setup");
-      if (saved) {
-        d = loadSetup(JSON.parse(saved));
-        setPlayers(d.players);
-        setCfg(d.cfg);
-        setRules(d.rules);
-      }
-    } catch (e) { /* no saved setup yet */ }
-    solveWith(d.players, d.cfg, d.rules, seed);
+    const saved = readJSON(SETUP_KEY);
+    if (saved) {
+      const d = loadSetup(saved);
+      setPlayers(d.players);
+      setCfg(d.cfg);
+      setRules(d.rules);
+      solveWith(d.players, d.cfg, d.rules, seed);
+    }
+    const h = readJSON(HISTORY_KEY);
+    if (Array.isArray(h)) setHistory(h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const saveSetup = () => {
-    try {
-      window.localStorage.setItem("greyhounds-setup", JSON.stringify({ players, cfg, rules }));
-      setSavedNote("Setup saved");
-    } catch (e) {
-      setSavedNote("Couldn't save on this device");
-    }
-    setTimeout(() => setSavedNote(""), 2500);
+    flash(writeJSON(SETUP_KEY, { players, cfg, rules }) ? "Setup saved" : "Couldn't save on this device");
+  };
+  const saveHistory = (h) => {
+    setHistory(h);
+    if (!writeJSON(HISTORY_KEY, h)) flash("Couldn't save history on this device");
   };
 
   const mins = useMemo(() => (result ? minutesFor(result, players, cfg) : null), [result, players, cfg]);
 
+  // ----- history -----
+  const commitGame = () => {
+    if (!result) return;
+    const entry = {
+      id: Date.now(),
+      date: commitDate || todayISO(),
+      label: commitLabel.trim(),
+      cfg: { ...cfg },
+      players: players.map((p) => ({ ...p })),
+      plans: result.plans,
+      minutes: mins,
+    };
+    saveHistory([entry, ...history]);
+    setCommitOpen(false);
+    setCommitLabel("");
+    flash("Game added to history");
+  };
+  const deleteGame = (id) => {
+    saveHistory(history.filter((g) => g.id !== id));
+    setConfirmDelete(null);
+  };
+  const exportHistory = () => {
+    const blob = new Blob([JSON.stringify(history, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `greyhounds-history-${todayISO()}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const importHistory = (file) => {
+    if (!file) return;
+    file.text().then((text) => {
+      try {
+        const incoming = JSON.parse(text);
+        if (!Array.isArray(incoming)) throw new Error("not a list");
+        const seen = new Set(history.map((g) => g.id));
+        const merged = [...history, ...incoming.filter((g) => g && g.id && !seen.has(g.id))]
+          .sort((a, b) => (b.date || "").localeCompare(a.date || "") || b.id - a.id);
+        saveHistory(merged);
+        flash(`Imported ${merged.length - history.length} game${merged.length - history.length === 1 ? "" : "s"}`);
+      } catch (e) {
+        flash("That file isn't a history export");
+      }
+    });
+  };
+  const totals = useMemo(() => {
+    const t = {};
+    for (const g of history) {
+      for (const [n, r] of Object.entries(g.minutes || {})) {
+        if (!t[n]) t[n] = { games: 0, min: 0, roles: {} };
+        if (r.min > 0) t[n].games++;
+        t[n].min += r.min;
+        for (const [k, v] of Object.entries(r.roles)) t[n].roles[k] = (t[n].roles[k] || 0) + v;
+      }
+    }
+    return t;
+  }, [history]);
+
+  // ----- setup editing -----
   const setPlayer = (i, patch) =>
     setPlayers(players.map((p, j) => (j === i ? { ...p, ...patch } : p)));
   const toggleNever = (i, role) => {
@@ -167,6 +273,7 @@ export default function LineupSolver() {
       : [...players[i].never, role];
     setPlayer(i, { never: nv });
   };
+  const setOut = (i, v) => setPlayer(i, { out: v === "" ? null : v === "absent" ? "absent" : +v });
   const patchRule = (rid, patch) => setRules(rules.map((r) => (r.id === rid ? { ...r, ...patch } : r)));
   const toggleRulePlayer = (rid, name) => {
     const r = rules.find((x) => x.id === rid);
@@ -183,18 +290,25 @@ export default function LineupSolver() {
     setPicker(false);
   };
 
-  const halfBoard = (h, compact = false) => {
-    const gk = h === 0 ? cfg.gk1 : cfg.gk2;
+  // ----- boards -----
+  // snap = { plans, cfg, players } so history entries render the same way.
+  const halfBoard = (h, snap, compact = false) => {
+    const gk = h === 0 ? snap.cfg.gk1 : snap.cfg.gk2;
     const grid = [];
+    let anyOut = false;
     for (let s = 0; s < SEGS; s++) {
-      const col = { GK: [gk], D: [], M: [], F: [], B: [] };
-      for (const [n, r] of Object.entries(result.plans[h][s])) col[r].push(n);
-      for (const p of players) {
-        const onField = result.plans[h][s][p.name] !== undefined || p.name === gk;
-        if (!onField) col.B.push(p.name);
+      const t = h * SEGS + s;
+      const col = { GK: [gk], D: [], M: [], F: [], B: [], O: [] };
+      for (const [n, r] of Object.entries(snap.plans[h][s])) col[r].push(n);
+      for (const p of snap.players) {
+        const onField = snap.plans[h][s][p.name] !== undefined || p.name === gk;
+        if (onField) continue;
+        if (available(p, t)) col.B.push(p.name);
+        else { col.O.push(p.name); anyOut = true; }
       }
       grid.push(col);
     }
+    const rows = ["GK", "D", "M", "F", "B", ...(anyOut ? ["O"] : [])];
     const pad = compact ? "p-1" : "p-2";
     return (
       <div className="overflow-x-auto">
@@ -208,7 +322,7 @@ export default function LineupSolver() {
             </tr>
           </thead>
           <tbody>
-            {["GK", "D", "M", "F", "B"].map((row) => (
+            {rows.map((row) => (
               <tr key={row} className="align-top">
                 <td className={`${pad} font-semibold text-slate-600`}>{ROLE_NAME[row]}</td>
                 {grid.map((col, s) => (
@@ -227,6 +341,32 @@ export default function LineupSolver() {
       </div>
     );
   };
+  const current = result ? { plans: result.plans, cfg, players } : null;
+
+  const minutesTable = (rows, ps) => (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-slate-500 border-b-2 border-slate-300">
+          <th className="text-left p-2">Player</th>
+          <th className="p-2">Minutes</th>
+          <th className="text-left p-2">Positions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {ps.map((p) => {
+          const r = rows[p.name] || { min: 0, roles: {} };
+          const out = p.out === "absent";
+          return (
+            <tr key={p.name} className={`border-t border-slate-100 ${out ? "text-slate-400" : ""}`}>
+              <td className="p-2 font-medium">{p.name}</td>
+              <td className="p-2 text-center font-semibold">{r.min}</td>
+              <td className="p-2 text-slate-600">{out ? "absent" : rolesText(r.roles)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
 
   const printSheet = () => (
     <div className="hidden print:block p-2 text-slate-900">
@@ -239,13 +379,13 @@ export default function LineupSolver() {
           <h2 className="text-sm font-bold text-emerald-950 mb-1">
             {h === 0 ? "First half" : "Second half"} · {h === 0 ? cfg.gk1 : cfg.gk2} in goal
           </h2>
-          {halfBoard(h, true)}
+          {halfBoard(h, current, true)}
         </section>
       ))}
       {mins && (
         <p className="text-[10px] text-slate-500 leading-relaxed">
           <span className="font-semibold text-slate-600">Minutes: </span>
-          {players.map((p) => `${p.name} ${mins[p.name].min}`).join(" · ")}
+          {players.filter((p) => p.out !== "absent").map((p) => `${p.name} ${mins[p.name].min}`).join(" · ")}
         </p>
       )}
     </div>
@@ -262,6 +402,9 @@ export default function LineupSolver() {
       {Object.keys(ROLE_PHRASE).map((x) => <option key={x} value={x}>{ROLE_PHRASE[x]}</option>)}
     </select>
   );
+  const btn = "px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 font-medium disabled:opacity-40 disabled:hover:bg-white";
+  const primary = "px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800 disabled:opacity-60";
+  const solveLabel = solving ? "Solving…" : "Solve";
 
   return (
     <div className="min-h-screen bg-stone-50 print:bg-white text-slate-900" style={{ fontFamily: "ui-sans-serif, system-ui" }}>
@@ -272,92 +415,232 @@ export default function LineupSolver() {
             <h1 className="text-3xl font-extrabold tracking-tight text-emerald-950">Greyhounds lineup solver</h1>
             <p className="text-slate-600 mt-1">Eight segments, subs at 6:00, 12:00 and 18:00. Change any constraint and re-solve.</p>
           </div>
-          <div className="flex gap-2 items-center">
-            {savedNote && <span className="text-sm text-emerald-700">{savedNote}</span>}
-            <button onClick={() => window.print()} disabled={!result}
-              className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 font-medium disabled:opacity-40 disabled:hover:bg-white">Print</button>
-            <button onClick={saveSetup} className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 font-medium">Save setup</button>
+          <div className="flex flex-wrap gap-2 items-center">
+            {note && <span className="text-sm text-emerald-700">{note}</span>}
+            <button onClick={() => window.print()} disabled={!result} className={btn}>Print</button>
+            <button onClick={() => setCommitOpen(!commitOpen)} disabled={!result} className={btn}>Commit to history</button>
+            <button onClick={saveSetup} className={btn}>Save setup</button>
             <button onClick={() => { const s = Math.floor(Math.random() * 1e6); setSeed(s); run(s); }} disabled={solving}
               className="px-3 py-2 rounded-lg border border-emerald-900 bg-white text-emerald-900 hover:bg-emerald-50 font-medium disabled:opacity-40">Shuffle</button>
-            <button onClick={() => run(seed)} disabled={solving}
-              className="px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800 disabled:opacity-60">{solving ? "Solving…" : "Solve"}</button>
+            <button onClick={() => run(seed)} disabled={solving} className={primary}>{solveLabel}</button>
           </div>
         </header>
 
         <div className="grid lg:grid-cols-[1fr_380px] gap-6">
           {/* ---------- Results ---------- */}
           <div className="space-y-4">
-            {stale && (
-              <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="font-semibold">Setup changed.</p>
-                  <p className="text-sm mt-1">The previous lineup no longer matches your constraints. Solve again to build a new one.</p>
-                </div>
-                <button onClick={() => run(seed)} disabled={solving}
-                  className="px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800 disabled:opacity-60">{solving ? "Solving…" : "Solve"}</button>
+            {commitOpen && result && (
+              <div className="bg-white border border-emerald-300 rounded-xl p-4 flex flex-wrap items-end gap-3">
+                <label className="text-sm">
+                  <span className="block text-slate-500 mb-1">Opponent or note</span>
+                  <input value={commitLabel} onChange={(e) => setCommitLabel(e.target.value)} placeholder="vs. Tigers"
+                    className="border border-slate-300 rounded-md px-2 py-1 bg-white w-48" />
+                </label>
+                <label className="text-sm">
+                  <span className="block text-slate-500 mb-1">Date</span>
+                  <input type="date" value={commitDate} onChange={(e) => setCommitDate(e.target.value)}
+                    className="border border-slate-300 rounded-md px-2 py-1 bg-white" />
+                </label>
+                <button onClick={commitGame} className={primary}>Commit this lineup</button>
+                <button onClick={() => setCommitOpen(false)} className={btn}>Cancel</button>
               </div>
             )}
-            {solving && !sol && (
-              <p className="text-slate-500">Solving…</p>
-            )}
-            {failed && !stale && (
-              <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-amber-900">
-                <p className="font-semibold">No schedule satisfies all of these constraints together.</p>
-                <p className="text-sm mt-1">Loosen something and solve again — the usual culprits are an anchor with too few eligible players, a cap that's too tight, or too many Never restrictions on the same position.</p>
-              </div>
-            )}
-            {result && (
+
+            <div className="flex flex-wrap gap-2">
+              {["First half", "Second half", "Minutes", `History (${history.length})`].map((t, i) => (
+                <button key={t} onClick={() => setTab(i)}
+                  className={`px-4 py-2 rounded-lg font-semibold ${tab === i ? "bg-emerald-900 text-white" : "bg-white border border-slate-300 text-slate-700 hover:bg-slate-100"}`}>{t}</button>
+              ))}
+            </div>
+
+            {tab < 3 && (
               <>
-                <div className="flex gap-2">
-                  {["First half", "Second half", "Minutes"].map((t, i) => (
-                    <button key={t} onClick={() => setTab(i)}
-                      className={`px-4 py-2 rounded-lg font-semibold ${tab === i ? "bg-emerald-900 text-white" : "bg-white border border-slate-300 text-slate-700 hover:bg-slate-100"}`}>{t}</button>
-                  ))}
-                </div>
+                {stale && (
+                  <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="font-semibold">Setup changed.</p>
+                      <p className="text-sm mt-1">The previous lineup no longer matches your setup. Solve again to build a new one.</p>
+                    </div>
+                    <button onClick={() => run(seed)} disabled={solving} className={primary}>{solveLabel}</button>
+                  </div>
+                )}
+                {!sol && !solving && (
+                  <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-slate-600">
+                    <p className="font-semibold text-slate-800">No lineup yet.</p>
+                    <p className="text-sm mt-1 mb-3">Mark anyone who's out, check the goalies, then solve.</p>
+                    <button onClick={() => run(seed)} className={primary}>Solve</button>
+                  </div>
+                )}
+                {solving && !result && <p className="text-slate-500">Solving…</p>}
+                {failReason !== null && (
+                  <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-amber-900">
+                    <p className="font-semibold">No lineup satisfies this setup.</p>
+                    <p className="text-sm mt-1">
+                      {failReason || "Loosen something and solve again — the usual culprits are an anchor with too few eligible players, a cap that's too tight, or too many Never restrictions on the same position."}
+                    </p>
+                  </div>
+                )}
+                {result && (
+                  <>
+                    <div className="bg-white rounded-xl border border-slate-200 p-4">
+                      {tab < 2 && (
+                        <>
+                          <p className="text-sm text-slate-500 mb-3">
+                            {tab === 0 ? cfg.gk1 : cfg.gk2} is in goal. Reading down a column shows the whole field for that stretch; every change between columns is a straight bench swap.
+                          </p>
+                          {halfBoard(tab, current)}
+                        </>
+                      )}
+                      {tab === 2 && mins && minutesTable(mins, players)}
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      Built in: playing time is shared evenly among everyone who's here, nobody sits twice in a row (including across halftime), goalies get a full half in net plus their field segments, and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
+                    </p>
+                  </>
+                )}
+              </>
+            )}
+
+            {tab === 3 && (
+              <div className="space-y-4">
                 <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  {tab < 2 && (
-                    <>
-                      <p className="text-sm text-slate-500 mb-3">
-                        {tab === 0 ? cfg.gk1 : cfg.gk2} is in goal. Reading down a column shows the whole field for that stretch; every change between columns is a straight bench swap.
-                      </p>
-                      {halfBoard(tab)}
-                    </>
-                  )}
-                  {tab === 2 && mins && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <h2 className="font-bold text-emerald-950">Season totals</h2>
+                    <div className="flex gap-2">
+                      <button onClick={exportHistory} disabled={history.length === 0} className={`${btn} text-sm py-1`}>Export</button>
+                      <button onClick={() => importRef.current?.click()} className={`${btn} text-sm py-1`}>Import</button>
+                      <input ref={importRef} type="file" accept="application/json" className="hidden"
+                        onChange={(e) => { importHistory(e.target.files?.[0]); e.target.value = ""; }} />
+                    </div>
+                  </div>
+                  {history.length === 0 ? (
+                    <p className="text-sm text-slate-500">No games yet. Solve a lineup, then use “Commit to history” to record it. History lives in this browser; export it to share with another coach.</p>
+                  ) : (
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="text-slate-500 border-b-2 border-slate-300">
                           <th className="text-left p-2">Player</th>
+                          <th className="p-2">Games</th>
                           <th className="p-2">Minutes</th>
+                          <th className="p-2">Avg</th>
                           <th className="text-left p-2">Positions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {players.map((p) => {
-                          const r = mins[p.name];
-                          const parts = Object.entries(r.roles)
-                            .map(([k, v]) => `${v} ${ROLE_NAME[k].toLowerCase()}`).join(", ");
-                          return (
-                            <tr key={p.name} className="border-t border-slate-100">
-                              <td className="p-2 font-medium">{p.name}</td>
-                              <td className="p-2 text-center font-semibold">{r.min}</td>
-                              <td className="p-2 text-slate-600">{parts}</td>
-                            </tr>
-                          );
-                        })}
+                        {Object.entries(totals).sort((a, b) => b[1].min - a[1].min).map(([n, r]) => (
+                          <tr key={n} className="border-t border-slate-100">
+                            <td className="p-2 font-medium">{n}</td>
+                            <td className="p-2 text-center">{r.games}</td>
+                            <td className="p-2 text-center font-semibold">{r.min}</td>
+                            <td className="p-2 text-center text-slate-600">{r.games ? Math.round(r.min / r.games) : 0}</td>
+                            <td className="p-2 text-slate-600">{rolesText(r.roles)}</td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   )}
                 </div>
-                <p className="text-xs text-slate-500">
-                  Built in: everyone plays at least 5 of 8 segments, goalies get a full half in net plus their field segments, nobody sits twice in a row (including across halftime), and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
-                </p>
-              </>
+
+                {history.map((g) => (
+                  <div key={g.id} className="bg-white rounded-xl border border-slate-200 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <button onClick={() => setOpenGame(openGame === g.id ? null : g.id)} className="text-left">
+                        <span className="font-bold text-emerald-950">{g.label || "Game"}</span>
+                        <span className="text-slate-500 text-sm ml-2">{g.date}</span>
+                        <span className="block text-xs text-slate-500">
+                          {g.cfg.gk1} then {g.cfg.gk2} in goal
+                          {g.players.some((p) => p.out) && ` · out: ${g.players.filter((p) => p.out).map((p) => p.name).join(", ")}`}
+                        </span>
+                      </button>
+                      <div className="flex gap-2 items-center text-sm">
+                        <button onClick={() => setOpenGame(openGame === g.id ? null : g.id)} className={`${btn} py-1`}>
+                          {openGame === g.id ? "Hide" : "Show"}
+                        </button>
+                        {confirmDelete === g.id ? (
+                          <>
+                            <button onClick={() => deleteGame(g.id)} className="px-3 py-1 rounded-lg bg-red-700 text-white font-medium">Delete</button>
+                            <button onClick={() => setConfirmDelete(null)} className={`${btn} py-1`}>Keep</button>
+                          </>
+                        ) : (
+                          <button onClick={() => setConfirmDelete(g.id)} className="text-slate-400 hover:text-red-600 px-1" title="Delete game">✕</button>
+                        )}
+                      </div>
+                    </div>
+                    {openGame === g.id && (
+                      <div className="mt-3 space-y-4">
+                        {[0, 1].map((h) => (
+                          <div key={h}>
+                            <p className="text-sm font-semibold text-slate-600 mb-1">{h === 0 ? "First half" : "Second half"}</p>
+                            {halfBoard(h, { plans: g.plans, cfg: g.cfg, players: g.players }, true)}
+                          </div>
+                        ))}
+                        {minutesTable(g.minutes || {}, g.players)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </div>
 
-          {/* ---------- Constraints ---------- */}
+          {/* ---------- Setup ---------- */}
           <div className="space-y-5">
+            <section className="bg-white rounded-xl border border-slate-200 p-4">
+              <h2 className="font-bold text-emerald-950 mb-1">Players</h2>
+              <p className="text-xs text-slate-500 mb-2">Pref nudges the solver toward a position; Never is a hard rule. Mark anyone absent or leaving early.</p>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-slate-500">
+                    <th className="text-left py-1">Name</th><th>Pref</th><th>Never</th><th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {players.map((p, i) => (
+                    <tr key={i} className={`border-t border-slate-100 ${p.out ? "text-slate-400" : ""}`}>
+                      <td className="py-1 font-medium">{p.name}</td>
+                      <td className="text-center">
+                        <select value={p.pref} onChange={(e) => setPlayer(i, { pref: e.target.value })}
+                          className="border border-slate-200 rounded px-1 bg-white">
+                          <option value="">–</option>
+                          {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                      </td>
+                      <td className="text-center">
+                        <div className="flex gap-0.5 justify-center">
+                          {ROLES.map((r) => (
+                            <button key={r} onClick={() => toggleNever(i, r)}
+                              className={`w-6 h-5 rounded border text-[10px] ${p.never.includes(r) ? "bg-red-700 text-white border-red-700" : "bg-white text-slate-400 border-slate-200"}`}>{r}</button>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="text-center">
+                        <select value={p.out == null ? "" : String(p.out)} onChange={(e) => setOut(i, e.target.value)}
+                          className={`border rounded px-1 bg-white max-w-[7.5rem] ${p.out ? "border-red-300 text-red-700" : "border-slate-200"}`}>
+                          {OUT_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+
+            <section className="bg-white rounded-xl border border-slate-200 p-4">
+              <h2 className="font-bold text-emerald-950 mb-3">Goalies</h2>
+              <div className="space-y-2 text-sm">
+                {["gk1", "gk2"].map((k, i) => (
+                  <label key={k} className="flex items-center justify-between gap-2">
+                    <span>{i === 0 ? "First half in goal" : "Second half in goal"}</span>
+                    <select value={cfg[k]} onChange={(e) => setCfg({ ...cfg, [k]: e.target.value })}
+                      className="border border-slate-300 rounded-md px-2 py-1 bg-white">
+                      {players.map((p) => <option key={p.name} value={p.name}>{p.name}{p.out ? " (out)" : ""}</option>)}
+                    </select>
+                  </label>
+                ))}
+                <p className="text-xs text-slate-500">Each goalie also gets two field segments in their other half.</p>
+              </div>
+            </section>
+
             <section className="bg-white rounded-xl border border-slate-200 p-4">
               <div className="flex items-center justify-between mb-1">
                 <h2 className="font-bold text-emerald-950">Constraints</h2>
@@ -412,63 +695,6 @@ export default function LineupSolver() {
                   </div>
                 ))}
               </div>
-            </section>
-
-            <section className="bg-white rounded-xl border border-slate-200 p-4">
-              <h2 className="font-bold text-emerald-950 mb-3">Goalies</h2>
-              <div className="space-y-2 text-sm">
-                {["gk1", "gk2"].map((k, i) => (
-                  <label key={k} className="flex items-center justify-between gap-2">
-                    <span>{i === 0 ? "First half in goal" : "Second half in goal"}</span>
-                    <select value={cfg[k]} onChange={(e) => setCfg({ ...cfg, [k]: e.target.value })}
-                      className="border border-slate-300 rounded-md px-2 py-1 bg-white">
-                      {players.map((p) => <option key={p.name}>{p.name}</option>)}
-                    </select>
-                  </label>
-                ))}
-                <label className="flex items-center justify-between gap-2">
-                  <span>Field segments per goalie</span>
-                  <select value={cfg.goalieFieldSegs} onChange={(e) => setCfg({ ...cfg, goalieFieldSegs: +e.target.value })}
-                    className="border border-slate-300 rounded-md px-2 py-1 bg-white">
-                    <option value={2}>2 (premium, ~37 min)</option>
-                    <option value={1}>1 (~31 min, two others get a sixth segment)</option>
-                  </select>
-                </label>
-              </div>
-            </section>
-
-            <section className="bg-white rounded-xl border border-slate-200 p-4">
-              <h2 className="font-bold text-emerald-950 mb-1">Players</h2>
-              <p className="text-xs text-slate-500 mb-2">Pref nudges the solver toward a position; Never is a hard rule.</p>
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="text-slate-500">
-                    <th className="text-left py-1">Name</th><th>Pref</th><th>Never</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {players.map((p, i) => (
-                    <tr key={i} className="border-t border-slate-100">
-                      <td className="py-1 font-medium">{p.name}</td>
-                      <td className="text-center">
-                        <select value={p.pref} onChange={(e) => setPlayer(i, { pref: e.target.value })}
-                          className="border border-slate-200 rounded px-1 bg-white">
-                          <option value="">–</option>
-                          {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-                        </select>
-                      </td>
-                      <td className="text-center">
-                        <div className="flex gap-0.5 justify-center">
-                          {ROLES.map((r) => (
-                            <button key={r} onClick={() => toggleNever(i, r)}
-                              className={`w-6 h-5 rounded border text-[10px] ${p.never.includes(r) ? "bg-red-700 text-white border-red-700" : "bg-white text-slate-400 border-slate-200"}`}>{r}</button>
-                          ))}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </section>
           </div>
         </div>
