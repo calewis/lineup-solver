@@ -10,9 +10,6 @@ const roster = [
 const RULES = [
   { id: 1, type: "atLeast", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 1 },
   { id: 2, type: "atMost", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 3 },
-  { id: 3, type: "atMost", players: ["Adam", "William", "Lev"], role: "M", n: 2 },
-  { id: 4, type: "atLeast", players: ["Ryan", "Theodore", "Khalid"], role: "D", n: 1 },
-  { id: 5, type: "notBoth", players: ["Lev", "Adam"], role: "D", n: 1 },
 ];
 const cfg = { gk1: "Ethan", gk2: "Michael", goalieFieldSegs: 2 };
 const withOut = (edits) => roster.map((p) => ({ ...p, out: edits[p.name] ?? null }));
