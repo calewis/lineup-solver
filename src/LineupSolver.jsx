@@ -9,6 +9,7 @@ const SLOT_NAME = { LF: "Left forward", RF: "Right forward", LM: "Left mid", CM:
 const ROLE_NAME = { D: "Defense", M: "Mid", F: "Forward", GK: "In goal", B: "Bench", O: "Out" };
 const ROLE_PHRASE = { any: "on the field", D: "in defense", M: "in midfield", F: "at forward" };
 const RULE_TEMPLATES = [
+  { type: "between", label: "Balance", desc: "Between M and N of these players at a position (or on the field at all)." },
   { type: "atMost", label: "Cap", desc: "At most N of these players at a position (or on the field at all)." },
   { type: "atLeast", label: "Anchor", desc: "At least N of these players at a position (or on the field at all)." },
   { type: "notBoth", label: "Keep apart", desc: "Never two of these players together at a position." },
@@ -48,8 +49,7 @@ const DEFAULT_PLAYERS = [
 ].map((p) => ({ ...p, out: null }));
 
 const DEFAULT_RULES = [
-  { id: 1, type: "atLeast", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 1 },
-  { id: 2, type: "atMost", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 3 },
+  { id: 1, type: "between", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", lo: 1, hi: 3 },
 ];
 
 const DEFAULT_CFG = {
@@ -285,7 +285,7 @@ export default function LineupSolver() {
     });
   };
   const addRule = (type) => {
-    setRules([...rules, { id: Date.now() + Math.random(), type, players: [], role: "any", n: type === "atMost" ? 2 : 1 }]);
+    setRules([...rules, { id: Date.now() + Math.random(), type, players: [], role: "any", n: type === "atMost" ? 2 : 1, lo: 1, hi: 3 }]);
     setPicker(false);
   };
   const restoreDefaults = () => {
@@ -462,9 +462,9 @@ export default function LineupSolver() {
     </div>
   );
 
-  const numInput = (r, min, max) => (
-    <input type="number" min={min} max={max} value={r.n}
-      onChange={(e) => patchRule(r.id, { n: +e.target.value })}
+  const numInput = (r, min, max, field = "n") => (
+    <input type="number" min={min} max={max} value={r[field]}
+      onChange={(e) => patchRule(r.id, { [field]: +e.target.value })}
       className="w-12 border border-slate-300 rounded px-1 mx-1" />
   );
   const roleSelect = (r) => (
@@ -767,6 +767,7 @@ export default function LineupSolver() {
                   <div key={r.id} className="border border-slate-200 rounded-lg p-2.5 bg-stone-50">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="font-medium">
+                        {r.type === "between" && <>Between {numInput(r, 0, 8, "lo")} and {numInput(r, 0, 8, "hi")} of these {roleSelect(r)}</>}
                         {r.type === "atMost" && <>At most {numInput(r, 0, 8)} of these {roleSelect(r)}</>}
                         {r.type === "atLeast" && <>At least {numInput(r, 1, 8)} of these {roleSelect(r)}</>}
                         {r.type === "notBoth" && <>Never two of these together {roleSelect(r)}</>}

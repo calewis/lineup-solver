@@ -221,6 +221,11 @@ export function buildModel(players, cfg, rules, seed) {
     } else if (rule.type === "atLeast") {
       if (terms.length < rule.n) return { reason: "An anchor constraint needs more eligible players than are available in some segment." };
       cons.push(`${terms.join(" + ")} >= ${rule.n}`);
+    } else if (rule.type === "between") {
+      if (rule.lo > rule.hi) return { reason: "A balance constraint has its minimum above its maximum." };
+      if (terms.length < rule.lo) return { reason: "A balance constraint needs more eligible players than are available in some segment." };
+      if (rule.lo > 0) cons.push(`${terms.join(" + ")} >= ${rule.lo}`);
+      if (terms.length > rule.hi) cons.push(`${terms.join(" + ")} <= ${rule.hi}`);
     } else if (rule.type === "notBoth") {
       if (terms.length >= 2) cons.push(`${terms.join(" + ")} <= 1`);
     }

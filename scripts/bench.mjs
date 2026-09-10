@@ -8,8 +8,7 @@ const roster = [
   ["Lev", "", []], ["William", "", []],
 ].map(([name, pref, never]) => ({ name, pref, never, out: null }));
 const RULES = [
-  { id: 1, type: "atLeast", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 1 },
-  { id: 2, type: "atMost", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", n: 3 },
+  { id: 1, type: "between", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", lo: 1, hi: 3 },
 ];
 const cfg = { gk1: "Ethan", gk2: "Michael", goalieFieldSegs: 2 };
 const withOut = (edits) => roster.map((p) => ({ ...p, out: edits[p.name] ?? null }));
