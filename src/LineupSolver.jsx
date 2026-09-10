@@ -267,24 +267,29 @@ export default function LineupSolver() {
   const [savedNote, setSavedNote] = useState("");
   const [picker, setPicker] = useState(false);
 
-  const run = (s = seed) => {
-    const result = solve(players, cfg, rules, s);
-    setSol(result);
+  // A solution remembers the exact inputs it was built from. If any of them
+  // change, the solution is stale and disappears until the coach re-solves.
+  const solveWith = (p, c, r, s) => {
+    const result = solve(p, c, r, s);
+    setSol({ result, players: p, cfg: c, rules: r });
     setFailed(!result);
   };
+  const run = (s = seed) => solveWith(players, cfg, rules, s);
+  const stale = !!sol && (sol.players !== players || sol.cfg !== cfg || sol.rules !== rules);
+  const result = sol && !stale ? sol.result : null;
+
   useEffect(() => {
+    let d = { players: DEFAULT_PLAYERS, cfg: DEFAULT_CFG, rules: DEFAULT_RULES };
     try {
       const saved = window.localStorage.getItem("greyhounds-setup");
       if (saved) {
-        const d = loadSetup(JSON.parse(saved));
+        d = loadSetup(JSON.parse(saved));
         setPlayers(d.players);
         setCfg(d.cfg);
         setRules(d.rules);
-        setTimeout(() => run(seed), 0);
-        return;
       }
     } catch (e) { /* no saved setup yet */ }
-    run(seed);
+    solveWith(d.players, d.cfg, d.rules, seed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -298,7 +303,7 @@ export default function LineupSolver() {
     setTimeout(() => setSavedNote(""), 2500);
   };
 
-  const mins = useMemo(() => (sol ? minutesFor(sol, players, cfg) : null), [sol, players, cfg]);
+  const mins = useMemo(() => (result ? minutesFor(result, players, cfg) : null), [result, players, cfg]);
 
   const setPlayer = (i, patch) =>
     setPlayers(players.map((p, j) => (j === i ? { ...p, ...patch } : p)));
@@ -324,38 +329,39 @@ export default function LineupSolver() {
     setPicker(false);
   };
 
-  const halfBoard = (h) => {
+  const halfBoard = (h, compact = false) => {
     const gk = h === 0 ? cfg.gk1 : cfg.gk2;
     const grid = [];
     for (let s = 0; s < SEGS; s++) {
       const col = { GK: [gk], D: [], M: [], F: [], B: [] };
-      for (const [n, r] of Object.entries(sol.plans[h][s])) col[r].push(n);
+      for (const [n, r] of Object.entries(result.plans[h][s])) col[r].push(n);
       for (const p of players) {
-        const onField = sol.plans[h][s][p.name] !== undefined || p.name === gk;
+        const onField = result.plans[h][s][p.name] !== undefined || p.name === gk;
         if (!onField) col.B.push(p.name);
       }
       grid.push(col);
     }
+    const pad = compact ? "p-1" : "p-2";
     return (
       <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-sm">
+        <table className={`w-full border-collapse ${compact ? "text-xs" : "text-sm"}`}>
           <thead>
             <tr>
-              <th className="text-left p-2 text-slate-500 font-medium w-20"></th>
+              <th className={`text-left ${pad} text-slate-500 font-medium w-20`}></th>
               {SEG_LABEL.map((l, s) => (
-                <th key={s} className="p-2 text-slate-600 font-semibold border-b-2 border-slate-300">{l}</th>
+                <th key={s} className={`${pad} text-slate-600 font-semibold border-b-2 border-slate-300`}>{l}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {["GK", "D", "M", "F", "B"].map((row) => (
               <tr key={row} className="align-top">
-                <td className="p-2 font-semibold text-slate-600">{ROLE_NAME[row]}</td>
+                <td className={`${pad} font-semibold text-slate-600`}>{ROLE_NAME[row]}</td>
                 {grid.map((col, s) => (
-                  <td key={s} className="p-1.5 border-l border-slate-200">
-                    <div className="flex flex-col gap-1">
+                  <td key={s} className={`${compact ? "p-1" : "p-1.5"} border-l border-slate-200`}>
+                    <div className={`flex flex-col ${compact ? "gap-0.5" : "gap-1"}`}>
                       {col[row].sort().map((n) => (
-                        <span key={n} className={`px-2 py-0.5 rounded-md border text-center ${TINT[row]}`}>{n}</span>
+                        <span key={n} className={`px-2 ${compact ? "py-px" : "py-0.5"} rounded-md border text-center ${TINT[row]}`}>{n}</span>
                       ))}
                     </div>
                   </td>
@@ -367,6 +373,29 @@ export default function LineupSolver() {
       </div>
     );
   };
+
+  const printSheet = () => (
+    <div className="hidden print:block p-2 text-slate-900">
+      <div className="flex items-baseline justify-between mb-2">
+        <h1 className="text-xl font-extrabold text-emerald-950">Greyhounds lineup</h1>
+        <span className="text-xs text-slate-500">Subs at 6:00, 12:00 and 18:00 each half</span>
+      </div>
+      {[0, 1].map((h) => (
+        <section key={h} className="mb-3">
+          <h2 className="text-sm font-bold text-emerald-950 mb-1">
+            {h === 0 ? "First half" : "Second half"} · {h === 0 ? cfg.gk1 : cfg.gk2} in goal
+          </h2>
+          {halfBoard(h, true)}
+        </section>
+      ))}
+      {mins && (
+        <p className="text-[10px] text-slate-500 leading-relaxed">
+          <span className="font-semibold text-slate-600">Minutes: </span>
+          {players.map((p) => `${p.name} ${mins[p.name].min}`).join(" · ")}
+        </p>
+      )}
+    </div>
+  );
 
   const numInput = (r, min, max) => (
     <input type="number" min={min} max={max} value={r.n}
@@ -381,8 +410,9 @@ export default function LineupSolver() {
   );
 
   return (
-    <div className="min-h-screen bg-stone-50 text-slate-900 p-4 md:p-8" style={{ fontFamily: "ui-sans-serif, system-ui" }}>
-      <div className="max-w-6xl mx-auto">
+    <div className="min-h-screen bg-stone-50 print:bg-white text-slate-900" style={{ fontFamily: "ui-sans-serif, system-ui" }}>
+      {result && printSheet()}
+      <div className="max-w-6xl mx-auto p-4 md:p-8 print:hidden">
         <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-3xl font-extrabold tracking-tight text-emerald-950">Greyhounds lineup solver</h1>
@@ -390,6 +420,8 @@ export default function LineupSolver() {
           </div>
           <div className="flex gap-2 items-center">
             {savedNote && <span className="text-sm text-emerald-700">{savedNote}</span>}
+            <button onClick={() => window.print()} disabled={!result}
+              className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 font-medium disabled:opacity-40 disabled:hover:bg-white">Print</button>
             <button onClick={saveSetup} className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 font-medium">Save setup</button>
             <button onClick={() => { const s = Math.floor(Math.random() * 1e6); setSeed(s); run(s); }}
               className="px-3 py-2 rounded-lg border border-emerald-900 bg-white text-emerald-900 hover:bg-emerald-50 font-medium">Shuffle</button>
@@ -400,13 +432,22 @@ export default function LineupSolver() {
         <div className="grid lg:grid-cols-[1fr_380px] gap-6">
           {/* ---------- Results ---------- */}
           <div className="space-y-4">
-            {failed && (
+            {stale && (
+              <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="font-semibold">Setup changed.</p>
+                  <p className="text-sm mt-1">The previous lineup no longer matches your constraints. Solve again to build a new one.</p>
+                </div>
+                <button onClick={() => run(seed)} className="px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800">Solve</button>
+              </div>
+            )}
+            {failed && !stale && (
               <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-amber-900">
                 <p className="font-semibold">No schedule satisfies all of these constraints together.</p>
                 <p className="text-sm mt-1">Loosen something and solve again — the usual culprits are an anchor with too few eligible players, a cap that's too tight, or too many Never restrictions on the same position.</p>
               </div>
             )}
-            {sol && (
+            {result && (
               <>
                 <div className="flex gap-2">
                   {["First half", "Second half", "Minutes"].map((t, i) => (
