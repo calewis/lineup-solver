@@ -1,6 +1,6 @@
 // node scripts/bench.mjs — solve a few setups and report timing and fairness.
 import highsLoader from "highs";
-import { buildModel, available, T } from "../src/model.js";
+import { buildModel, timingOf } from "../src/model.js";
 const roster = [
   ["Michael", "", ["D"]], ["Ethan", "", ["D", "F"]], ["Drew", "F", []], ["Isaac", "F", []],
   ["Khalid", "D", []], ["Theodore", "D", ["F"]], ["Ryan", "D", []], ["Neil", "D", []],
@@ -10,12 +10,16 @@ const roster = [
 const RULES = [
   { id: 1, type: "between", players: ["Drew", "Isaac", "Khalid", "Theodore"], role: "any", lo: 1, hi: 3 },
 ];
-const cfg = { gk1: "Ethan", gk2: "Michael", goalieFieldSegs: 2, size: 9, formation: { D: 3, M: 3, F: 2 } };
+const cfg = { gks: ["Ethan", "Michael"], size: 9, formation: { D: 3, M: 3, F: 2 }, periodType: "halves", periodMin: 25, segsPerPeriod: 4 };
+const cfgQ = { ...cfg, periodType: "quarters", periodMin: 12, segsPerPeriod: 2, gks: ["Ethan", "Ethan", "Michael", "Michael"] };
+const cfgQ4 = { ...cfgQ, gks: ["Ethan", "Michael", "Drew", "Isaac"] };
 const cfg7 = { ...cfg, size: 7, formation: { D: 3, M: 2, F: 1 } };
 const cfg11 = { ...cfg, size: 11, formation: { D: 4, M: 4, F: 2 } };
 const withOut = (edits) => roster.map((p) => ({ ...p, out: edits[p.name] ?? null }));
 const cases = [
   ["full roster", roster, cfg],
+  ["quarters 12x2, 14 players", roster, cfgQ],
+  ["quarters, 4 different goalies", roster, cfgQ4],
   ["7v7 3-2-1, 10 players", roster.slice(0, 10), cfg7],
   ["11v11 4-4-2, 14 players", roster, cfg11],
   ["11v11 4-4-2, 12 players", roster.slice(0, 12), cfg11],
@@ -39,8 +43,9 @@ for (const [label, players, c, rules = RULES] of cases) {
   const segs = {};
   let possible = 0;
   for (const p of players) { segs[p.name] = 0; }
-  for (let t = 0; t < T; t++) for (const [n, r] of Object.entries(plans[Math.floor(t / 4)][t % 4])) { segs[n]++; }
-  for (const p of players) if (p.pref && !(p.name === c.gk1 || p.name === c.gk2)) possible += segs[p.name];
-  const line = players.filter((p) => !(p.name === c.gk1 || p.name === c.gk2)).map((p) => `${p.name.slice(0, 3)}${segs[p.name]}`).join(" ");
+  const { S, T, gks } = timingOf(c);
+  for (let t = 0; t < T; t++) for (const [n, r] of Object.entries(plans[Math.floor(t / S)][t % S])) { segs[n]++; }
+  for (const p of players) if (p.pref && !gks.includes(p.name)) possible += segs[p.name];
+  const line = players.map((p) => `${p.name.slice(0, 3)}${segs[p.name]}`).join(" ");
   console.log(`${label}: ${ms}ms, prefs ${score}/${possible}, segs: ${line}`);
 }

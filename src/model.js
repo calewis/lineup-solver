@@ -3,10 +3,40 @@
 // a decoder that maps the solved variables back into per-segment lineups.
 // When the setup can be ruled out before solving, it returns { reason }.
 
-export const SEGS = 4; // per half
-export const SEG_LEN = [6, 6, 6, 7]; // minutes
 export const ROLES = ["D", "M", "F"];
-export const T = 2 * SEGS; // segments in the game
+
+// Game clock: halves or quarters, each split into equal-ish segments with
+// substitutions between them. Defaults keep the original 25-minute halves
+// with subs at 6:00, 12:00 and 18:00.
+export const PERIOD_TYPES = {
+  halves: { count: 2, names: ["1st half", "2nd half"], breakName: "halftime", periodMin: 25, segsPerPeriod: 4 },
+  quarters: { count: 4, names: ["Q1", "Q2", "Q3", "Q4"], breakName: "the break", periodMin: 12, segsPerPeriod: 2 },
+};
+export function timingOf(cfg = {}) {
+  const type = PERIOD_TYPES[cfg.periodType] ? cfg.periodType : "halves";
+  const def = PERIOD_TYPES[type];
+  const P = def.count;
+  const S = Math.max(1, Math.min(8, Math.round(cfg.segsPerPeriod) || def.segsPerPeriod));
+  const L = Math.max(S, Math.round(cfg.periodMin) || def.periodMin);
+  const base = Math.floor(L / S), rem = L - base * S;
+  const lens = Array.from({ length: S }, (_, i) => base + (i >= S - rem ? 1 : 0));
+  const starts = [];
+  let acc = 0;
+  for (const l of lens) { starts.push(acc); acc += l; }
+  const segLabels = lens.map((l, i) => `${starts[i]}–${starts[i] + l}`);
+  let gks = Array.isArray(cfg.gks) ? cfg.gks.slice(0, P) : [];
+  if (gks.length === 0 && cfg.gk1 !== undefined) gks = [cfg.gk1, cfg.gk2]; // setups saved before quarters existed
+  while (gks.length < P) gks.push("");
+  const goalieFieldSegs = Math.ceil(S / 2); // field segments a goalie gets in each period out of net
+  return {
+    type, P, S, T: P * S, L, lens, starts, segLabels, gks, goalieFieldSegs,
+    periodName: (i) => def.names[i],
+    breakName: def.breakName,
+    gkOf: (t) => gks[Math.floor(t / S)],
+    segLabel: (t) => `${def.names[Math.floor(t / S)]} ${segLabels[t % S]}`,
+    subTimes: starts.slice(1).map((m) => `${m}:00`),
+  };
+}
 
 // Game sizes (players per side including the goalie) with a default
 // formation for each, and the common alternatives listed as D-M-F.
@@ -110,19 +140,21 @@ export function buildModel(players, cfg, rules, seed) {
   if (names.length === 0) return { reason: "Add your players first." };
   if (names.some((n) => !n.trim())) return { reason: "Every player needs a name." };
   if (new Set(names).size !== names.length) return { reason: "Two players have the same name." };
-  if (!cfg.gk1 || !cfg.gk2) return { reason: "Pick a goalie for each half." };
+  const tm = timingOf(cfg);
+  const { P, S, T, gks, gkOf } = tm;
+  if (gks.some((g) => !g)) return { reason: `Pick a goalie for each ${tm.type === "halves" ? "half" : "quarter"}.` };
   const idx = Object.fromEntries(names.map((n, i) => [n, i]));
   const byName = Object.fromEntries(players.map((p) => [p.name, p]));
-  const gkOf = (t) => (t < SEGS ? cfg.gk1 : cfg.gk2);
-  const isGoalie = (n) => n === cfg.gk1 || n === cfg.gk2;
+  const goalies = [...new Set(gks)];
+  const isGoalie = (n) => goalies.includes(n);
   const inNet = (n, t) => n === gkOf(t);
 
-  // Goalies must be there for their half in net.
-  for (const g of [cfg.gk1, cfg.gk2]) {
+  // Goalies must be there for their time in net.
+  for (let i = 0; i < P; i++) {
+    const g = gks[i];
     if (!byName[g]) return { reason: `${g} is not on the roster.` };
-    const half = g === cfg.gk1 ? 0 : 1;
-    for (let s = 0; s < SEGS; s++) {
-      if (!available(byName[g], half * SEGS + s)) return { reason: `${g} is in goal for the ${half === 0 ? "first" : "second"} half but is marked out.` };
+    for (let s = 0; s < S; s++) {
+      if (!available(byName[g], i * S + s)) return { reason: `${g} is in goal for the ${tm.periodName(i)} but is marked out.` };
     }
   }
 
@@ -141,9 +173,20 @@ export function buildModel(players, cfg, rules, seed) {
     avail[n] = k;
   }
   let slots = FIELD * T;
-  const goalies = [cfg.gk1, cfg.gk2];
+  // A fair share of all playing time (field plus net) per player present.
+  const present = names.filter((n) => avail[n] > 0 || isGoalie(n)).length;
+  const fairTotal = Math.floor(((FIELD + 1) * T) / Math.max(1, present));
   for (const g of goalies) {
-    const want = Math.min(cfg.goalieFieldSegs, avail[g]);
+    // In each period out of net a goalie gets about half the segments, and
+    // never less than what brings their total up to a fair share.
+    let want = 0, netSegs = 0;
+    for (let i = 0; i < P; i++) {
+      let k = 0;
+      for (let s = 0; s < S; s++) if (onField(g, i * S + s)) k++;
+      if (gks[i] === g) { netSegs += S; continue; }
+      want += Math.min(tm.goalieFieldSegs, k);
+    }
+    want = Math.min(avail[g], Math.max(want, fairTotal - netSegs));
     target[g] = { lo: want, hi: want };
     slots -= want;
   }
@@ -223,19 +266,21 @@ export function buildModel(players, cfg, rules, seed) {
         if (onField(n, t) && onField(n, t + 1)) cons.push(`${y(n, t)} + ${y(n, t + 1)} >= 1`);
       }
     }
-    // Outfielders here for the whole game split their time evenly across halves.
+    // Outfielders here for the whole game split their time evenly across periods.
     if (!isGoalie(n) && ts.length === T) {
-      const h1 = [], h2 = [];
-      for (let s = 0; s < SEGS; s++) { h1.push(y(n, s)); h2.push(y(n, SEGS + s)); }
-      const diff = `${h1.join(" + ")} - ${h2.join(" - ")}`;
-      cons.push(`${diff} <= 1`);
-      cons.push(`${diff} >= -1`);
+      for (let i = 0; i < P; i++) for (let j = i + 1; j < P; j++) {
+        const a = [], b = [];
+        for (let s = 0; s < S; s++) { a.push(y(n, i * S + s)); b.push(y(n, j * S + s)); }
+        const diff = `${a.join(" + ")} - ${b.join(" - ")}`;
+        cons.push(`${diff} <= 1`);
+        cons.push(`${diff} >= -1`);
+      }
     }
   }
 
-  // Keep position while staying on the field within a half.
+  // Keep position while staying on the field within a period.
   for (const n of names) for (let t = 0; t < T; t++) {
-    if (t % SEGS === 0 || !onField(n, t) || !onField(n, t - 1)) continue;
+    if (t % S === 0 || !onField(n, t) || !onField(n, t - 1)) continue;
     for (const r of ROLES) {
       if (!canPlay(n, t, r) || !canPlay(n, t - 1, r)) continue;
       // x[t-1][r] + y[t] - 1 <= x[t][r]
@@ -274,7 +319,7 @@ export function buildModel(players, cfg, rules, seed) {
   ].join("\n");
 
   const decode = (columns) => {
-    const plans = [[], []];
+    const plans = Array.from({ length: P }, () => []);
     let score = 0;
     for (let t = 0; t < T; t++) {
       const seg = {};
@@ -286,7 +331,7 @@ export function buildModel(players, cfg, rules, seed) {
           else if (byName[n].pref2 === r) score += 0.5;
         }
       }
-      plans[Math.floor(t / SEGS)].push(seg);
+      plans[Math.floor(t / S)].push(seg);
     }
     return { plans, score };
   };
@@ -295,22 +340,19 @@ export function buildModel(players, cfg, rules, seed) {
 }
 
 // ---------- Validation of a hand-edited lineup ----------
-const HALF_NAME = ["1st half", "2nd half"];
-const SEG_TIMES = ["0–6", "6–12", "12–18", "18–25"];
 const ROLE_WORD = { D: "defense", M: "midfield", F: "forward", any: "the field" };
-const segLabel = (t) => `${HALF_NAME[Math.floor(t / SEGS)]} ${SEG_TIMES[t % SEGS]}`;
 
 // Returns a list of { level: "hard" | "note", text }. Hard items are rules the
 // solver would never break; notes are things the solver balances but a coach
 // may choose to override.
 export function checkLineup(plans, players, cfg, rules) {
   const NEED = cfg.formation;
+  const { S, T, gkOf, segLabel, gks } = timingOf(cfg);
   const issues = [];
   const hard = (text) => issues.push({ level: "hard", text });
   const note = (text) => issues.push({ level: "note", text });
   const byName = Object.fromEntries(players.map((p) => [p.name, p]));
-  const segAt = (t) => plans[Math.floor(t / SEGS)][t % SEGS];
-  const gkOf = (t) => (t < SEGS ? cfg.gk1 : cfg.gk2);
+  const segAt = (t) => plans[Math.floor(t / S)][t % S];
 
   for (let t = 0; t < T; t++) {
     const seg = segAt(t);
@@ -341,14 +383,14 @@ export function checkLineup(plans, players, cfg, rules) {
       const here = available(p, t) && n !== gkOf(t);
       const next = available(p, t + 1) && n !== gkOf(t + 1);
       if (here && next && !(n in segAt(t)) && !(n in segAt(t + 1))) hard(`${n} sits out ${segLabel(t)} and ${segLabel(t + 1)} back to back.`);
-      if ((t + 1) % SEGS !== 0 && n in segAt(t) && n in segAt(t + 1) && segAt(t)[n] !== segAt(t + 1)[n]) {
+      if ((t + 1) % S !== 0 && n in segAt(t) && n in segAt(t + 1) && segAt(t)[n] !== segAt(t + 1)[n]) {
         note(`${n} moves from ${ROLE_WORD[segAt(t)[n]]} to ${ROLE_WORD[segAt(t + 1)[n]]} without leaving the field (${segLabel(t + 1)}).`);
       }
     }
   }
 
   // Playing time spread among outfielders here for the whole game.
-  const full = players.filter((p) => p.out == null && p.name !== cfg.gk1 && p.name !== cfg.gk2);
+  const full = players.filter((p) => p.out == null && !gks.includes(p.name));
   const segs = Object.fromEntries(full.map((p) => [p.name, 0]));
   for (let t = 0; t < T; t++) for (const n of Object.keys(segAt(t))) if (n in segs) segs[n]++;
   const vals = Object.values(segs);

@@ -1,10 +1,13 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import highsLoader from "highs";
 import highsWasmUrl from "highs/runtime?url";
-import { SEGS, SEG_LEN, ROLES, GAME_SIZES, DEFAULT_FORMATION, FORMATION_PRESETS, outfieldCount, formationLabel, slotsFor, slotName, buildModel, available, assignSlots, swapSlots, checkLineup } from "./model.js";
+import {
+  ROLES, GAME_SIZES, DEFAULT_FORMATION, FORMATION_PRESETS, PERIOD_TYPES, timingOf,
+  outfieldCount, formationLabel, slotsFor, slotName,
+  buildModel, available, assignSlots, swapSlots, checkLineup,
+} from "./model.js";
 
 // ---------- Constants ----------
-const SEG_LABEL = ["0–6", "6–12", "12–18", "18–25"];
 const ROLE_NAME = { D: "Defense", M: "Mid", F: "Forward", GK: "In goal", B: "Bench", O: "Out" };
 const ROLE_PHRASE = { any: "on the field", D: "in defense", M: "in midfield", F: "at forward" };
 const RULE_TEMPLATES = [
@@ -12,12 +15,6 @@ const RULE_TEMPLATES = [
   { type: "atMost", label: "Cap", desc: "At most N of these players at a position (or on the field at all)." },
   { type: "atLeast", label: "Anchor", desc: "At least N of these players at a position (or on the field at all)." },
   { type: "notBoth", label: "Keep apart", desc: "Never two of these players together at a position." },
-];
-// Availability choices. The value is the first segment the player misses.
-const OUT_OPTIONS = [
-  ["", "Playing"], ["absent", "Absent"],
-  ["1", "Leaves 6:00"], ["2", "Leaves 12:00"], ["3", "Leaves 18:00"], ["4", "Leaves at halftime"],
-  ["5", "Leaves 31:00"], ["6", "Leaves 37:00"], ["7", "Leaves 43:00"],
 ];
 const TINT = {
   D: "bg-blue-100 border-blue-200 text-slate-800",
@@ -35,11 +32,12 @@ const DEFAULT_PLAYERS = [];
 const DEFAULT_RULES = [];
 const DEFAULT_SIZE = 9;
 const DEFAULT_CFG = {
-  gk1: "", // goalie, first half
-  gk2: "", // goalie, second half
-  goalieFieldSegs: 2, // field segments each goalie gets in their off half
+  gks: ["", ""], // goalie per period
   size: DEFAULT_SIZE, // players per side including the goalie
   formation: { ...DEFAULT_FORMATION[DEFAULT_SIZE] },
+  periodType: "halves",
+  periodMin: PERIOD_TYPES.halves.periodMin,
+  segsPerPeriod: PERIOD_TYPES.halves.segsPerPeriod,
 };
 const newPlayer = (name) => ({ name, pref: "", pref2: "", never: [], out: null });
 
@@ -62,21 +60,29 @@ async function solve(players, cfg, rules, seed) {
 }
 
 // ---------- Persistence ----------
+// Normalise any saved cfg (including ones from earlier versions) into the
+// current shape.
+function normalizeCfg(c = {}) {
+  const size = GAME_SIZES.includes(c.size) ? c.size : DEFAULT_SIZE;
+  const f = c.formation || {};
+  const formation = ROLES.every((r) => Number.isInteger(f[r]) && f[r] >= 0) ? { D: f.D, M: f.M, F: f.F } : { ...DEFAULT_FORMATION[size] };
+  const periodType = PERIOD_TYPES[c.periodType] ? c.periodType : "halves";
+  const def = PERIOD_TYPES[periodType];
+  const tm = timingOf({ ...c, periodType });
+  return {
+    gks: tm.gks,
+    size,
+    formation,
+    periodType,
+    periodMin: Number.isFinite(c.periodMin) ? c.periodMin : def.periodMin,
+    segsPerPeriod: Number.isInteger(c.segsPerPeriod) ? c.segsPerPeriod : def.segsPerPeriod,
+  };
+}
 function loadSetup(d) {
   const players = (d.players || DEFAULT_PLAYERS).map((p) => ({
     name: p.name, pref: p.pref || "", pref2: p.pref2 || "", never: p.never || [], out: p.out ?? null,
   }));
-  const c = d.cfg || {};
-  const size = GAME_SIZES.includes(c.size) ? c.size : DEFAULT_SIZE;
-  const f = c.formation || {};
-  const formation = ROLES.every((r) => Number.isInteger(f[r]) && f[r] >= 0) ? { D: f.D, M: f.M, F: f.F } : { ...DEFAULT_FORMATION[size] };
-  const cfg = {
-    gk1: c.gk1 ?? DEFAULT_CFG.gk1,
-    gk2: c.gk2 ?? DEFAULT_CFG.gk2,
-    goalieFieldSegs: DEFAULT_CFG.goalieFieldSegs,
-    size,
-    formation,
-  };
+  const cfg = normalizeCfg(d.cfg);
   const rules = (d.rules || DEFAULT_RULES).map((r) => ({ ...r, role: r.role || "any" }));
   return { players, cfg, rules };
 }
@@ -99,20 +105,20 @@ function writeJSON(key, value) {
 
 // ---------- Derived views ----------
 function minutesFor(result, players, cfg) {
+  const tm = timingOf(cfg);
   const rows = {};
   for (const p of players) rows[p.name] = { min: 0, roles: {} };
-  for (let h = 0; h < 2; h++) {
-    const gk = h === 0 ? cfg.gk1 : cfg.gk2;
-    for (let s = 0; s < SEGS; s++) {
-      if (rows[gk]) {
-        rows[gk].min += SEG_LEN[s];
-        rows[gk].roles["GK"] = (rows[gk].roles["GK"] || 0) + 1;
-      }
-      for (const [n, r] of Object.entries(result.plans[h][s])) {
-        if (!rows[n]) continue;
-        rows[n].min += SEG_LEN[s];
-        rows[n].roles[r] = (rows[n].roles[r] || 0) + 1;
-      }
+  for (let t = 0; t < tm.T; t++) {
+    const gk = tm.gkOf(t);
+    const len = tm.lens[t % tm.S];
+    if (rows[gk]) {
+      rows[gk].min += len;
+      rows[gk].roles["GK"] = (rows[gk].roles["GK"] || 0) + 1;
+    }
+    for (const [n, r] of Object.entries(result.plans[Math.floor(t / tm.S)][t % tm.S])) {
+      if (!rows[n]) continue;
+      rows[n].min += len;
+      rows[n].roles[r] = (rows[n].roles[r] || 0) + 1;
     }
   }
   return rows;
@@ -124,6 +130,10 @@ function todayISO() {
   const d = new Date();
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }
+function listWithAnd(items) {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
 
 // ---------- UI ----------
 export default function LineupSolver() {
@@ -132,7 +142,7 @@ export default function LineupSolver() {
   const [rules, setRules] = useState(DEFAULT_RULES);
   const [seed, setSeed] = useState(7);
   const [sol, setSol] = useState(null);
-  const [tab, setTab] = useState(0);
+  const [tab, setTab] = useState("p0");
   const [note, setNote] = useState("");
   const [picker, setPicker] = useState(false);
   const [solving, setSolving] = useState(false);
@@ -144,11 +154,13 @@ export default function LineupSolver() {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [newName, setNewName] = useState("");
-  const setupImportRef = useRef(null);
+  const [pick, setPick] = useState(null); // chip selected for a swap
   const [swapNote, setSwapNote] = useState(null); // minutes impact of the last manual swap
   const swapTimer = useRef(null);
-  const [pick, setPick] = useState(null); // chip selected for a position swap
   const importRef = useRef(null);
+  const setupImportRef = useRef(null);
+
+  const tm = useMemo(() => timingOf(cfg), [cfg]);
 
   const flash = (msg) => {
     setNote(msg);
@@ -193,6 +205,11 @@ export default function LineupSolver() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keep the active tab valid when the number of periods changes.
+  useEffect(() => {
+    if (tab.startsWith("p") && +tab.slice(1) >= tm.P) setTab("p0");
+  }, [tm.P, tab]);
+
   const saveSetup = () => {
     flash(writeJSON(SETUP_KEY, { players, cfg, rules }) ? "Setup saved" : "Couldn't save on this device");
   };
@@ -230,6 +247,8 @@ export default function LineupSolver() {
       }
     });
   };
+
+  // ----- roster and game editing -----
   const addPlayer = (name) => {
     const n = name.trim();
     if (!n || players.some((p) => p.name === n)) return false;
@@ -240,22 +259,57 @@ export default function LineupSolver() {
     const gone = players[i].name;
     setPlayers(players.filter((_, j) => j !== i));
     setRules(rules.map((r) => ({ ...r, players: r.players.filter((n) => n !== gone) })));
-    setCfg({ ...cfg, gk1: cfg.gk1 === gone ? "" : cfg.gk1, gk2: cfg.gk2 === gone ? "" : cfg.gk2 });
+    setCfg({ ...cfg, gks: cfg.gks.map((g) => (g === gone ? "" : g)) });
   };
   const renamePlayer = (i, name) => {
     const old = players[i].name;
     setPlayers(players.map((p, j) => (j === i ? { ...p, name } : p)));
     setRules(rules.map((r) => ({ ...r, players: r.players.map((n) => (n === old ? name : n)) })));
-    setCfg({ ...cfg, gk1: cfg.gk1 === old ? name : cfg.gk1, gk2: cfg.gk2 === old ? name : cfg.gk2 });
+    setCfg({ ...cfg, gks: cfg.gks.map((g) => (g === old ? name : g)) });
   };
+  const setPlayer = (i, patch) =>
+    setPlayers(players.map((p, j) => (j === i ? { ...p, ...patch } : p)));
+  const toggleNever = (i, role) => {
+    const nv = players[i].never.includes(role)
+      ? players[i].never.filter((r) => r !== role)
+      : [...players[i].never, role];
+    setPlayer(i, { never: nv });
+  };
+  const setOut = (i, v) => setPlayer(i, { out: v === "" ? null : v === "absent" ? "absent" : +v });
+  const setGk = (i, name) => setCfg({ ...cfg, gks: cfg.gks.map((g, j) => (j === i ? name : g)) });
   const setSize = (size) => setCfg({ ...cfg, size, formation: { ...DEFAULT_FORMATION[size] } });
   const setFormation = (formation) => setCfg({ ...cfg, formation });
+  const setPeriodType = (periodType) => {
+    if (periodType === cfg.periodType) return;
+    const def = PERIOD_TYPES[periodType];
+    // Carry goalies across: halves -> quarters doubles them up, quarters -> halves keeps Q1 and Q3.
+    const gks = periodType === "quarters" ? [cfg.gks[0], cfg.gks[0], cfg.gks[1], cfg.gks[1]] : [cfg.gks[0], cfg.gks[2]];
+    setCfg({ ...cfg, periodType, periodMin: def.periodMin, segsPerPeriod: def.segsPerPeriod, gks });
+  };
   const formationTotal = outfieldCount(cfg.formation);
   const formationOk = formationTotal === cfg.size - 1;
-  const saveHistory = (h) => {
-    setHistory(h);
-    if (!writeJSON(HISTORY_KEY, h)) flash("Couldn't save history on this device");
+
+  const patchRule = (rid, patch) => setRules(rules.map((r) => (r.id === rid ? { ...r, ...patch } : r)));
+  const toggleRulePlayer = (rid, name) => {
+    const r = rules.find((x) => x.id === rid);
+    patchRule(rid, {
+      players: r.players.includes(name) ? r.players.filter((p) => p !== name) : [...r.players, name],
+    });
   };
+  const addRule = (type) => {
+    setRules([...rules, { id: Date.now() + Math.random(), type, players: [], role: "any", n: type === "atMost" ? 2 : 1, lo: 1, hi: 3 }]);
+    setPicker(false);
+  };
+
+  // Availability choices: the value is the first segment the player misses.
+  const outOptions = useMemo(() => {
+    const opts = [["", "Playing"], ["absent", "Absent"]];
+    for (let t = 1; t < tm.T; t++) {
+      const s = t % tm.S;
+      opts.push([String(t), s === 0 ? `Leaves after ${tm.periodName(Math.floor(t / tm.S) - 1)}` : `Leaves ${tm.periodName(Math.floor(t / tm.S))} ${tm.starts[s]}:00`]);
+    }
+    return opts;
+  }, [tm]);
 
   const mins = useMemo(() => (result ? minutesFor(result, players, cfg) : null), [result, players, cfg]);
   const edited = !!sol && !stale && sol.edited;
@@ -269,6 +323,10 @@ export default function LineupSolver() {
   };
 
   // ----- history -----
+  const saveHistory = (h) => {
+    setHistory(h);
+    if (!writeJSON(HISTORY_KEY, h)) flash("Couldn't save history on this device");
+  };
   const commitGame = () => {
     if (!result) return;
     const entry = {
@@ -327,36 +385,56 @@ export default function LineupSolver() {
     return t;
   }, [history]);
 
-  // ----- setup editing -----
-  const setPlayer = (i, patch) =>
-    setPlayers(players.map((p, j) => (j === i ? { ...p, ...patch } : p)));
-  const toggleNever = (i, role) => {
-    const nv = players[i].never.includes(role)
-      ? players[i].never.filter((r) => r !== role)
-      : [...players[i].never, role];
-    setPlayer(i, { never: nv });
-  };
-  const setOut = (i, v) => setPlayer(i, { out: v === "" ? null : v === "absent" ? "absent" : +v });
-  const patchRule = (rid, patch) => setRules(rules.map((r) => (r.id === rid ? { ...r, ...patch } : r)));
-  const toggleRulePlayer = (rid, name) => {
-    const r = rules.find((x) => x.id === rid);
-    patchRule(rid, {
-      players: r.players.includes(name) ? r.players.filter((p) => p !== name) : [...r.players, name],
+  // ----- swaps -----
+  const current = result ? { plans: result.plans, slots, cfg, players } : null;
+  // Swap two players in one segment. Same row: swap sides, carried through
+  // the period. Different rows or the bench: exchange roles and spots in this
+  // segment only, then re-check the hard rules.
+  const doSwap = (h, s, a, b) => {
+    if (!slots || a === b) return;
+    const seg = current.plans[h][s];
+    const ra = seg[a], rb = seg[b];
+    if (ra === undefined && rb === undefined) { setPick(null); return; }
+    if (ra !== undefined && ra === rb) {
+      setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]) });
+      setPick(null);
+      return;
+    }
+    const nseg = { ...seg };
+    const nsl = { ...slots[h][s] };
+    const sa = nsl[a], sb = nsl[b];
+    if (rb !== undefined) { nseg[a] = rb; nsl[a] = sb; } else { delete nseg[a]; delete nsl[a]; }
+    if (ra !== undefined) { nseg[b] = ra; nsl[b] = sa; } else { delete nseg[b]; delete nsl[b]; }
+    const plans = result.plans.map((per, hh) => per.map((sg, ss) => (hh === h && ss === s ? nseg : sg)));
+    const nslots = slots.map((per, hh) => per.map((sg, ss) => (hh === h && ss === s ? nsl : sg)));
+    setSol({ ...sol, result: { ...result, plans }, slots: nslots, edited: true });
+    setPick(null);
+    // Tell the coach what the swap did to minutes and to the hard rules.
+    const before = minutesFor(result, players, cfg);
+    const after = minutesFor({ plans }, players, cfg);
+    const hardCount = checkLineup(plans, players, cfg, rules).filter((i) => i.level === "hard").length;
+    const line = (n) => (before[n].min === after[n].min
+      ? `${n}: ${after[n].min} min (unchanged)`
+      : `${n}: ${before[n].min} → ${after[n].min} min (${after[n].min > before[n].min ? "+" : ""}${after[n].min - before[n].min})`);
+    const where = `${tm.segLabels[s]} of the ${tm.periodName(h)}`;
+    setSwapNote({
+      title: ra !== undefined && rb !== undefined ? `Swapped ${a} and ${b} in ${where}` : `${rb === undefined ? b : a} on for ${rb === undefined ? a : b} in ${where}`,
+      lines: [line(a), line(b)],
+      hardCount,
     });
-  };
-  const addRule = (type) => {
-    setRules([...rules, { id: Date.now() + Math.random(), type, players: [], role: "any", n: type === "atMost" ? 2 : 1, lo: 1, hi: 3 }]);
-    setPicker(false);
+    clearTimeout(swapTimer.current);
+    swapTimer.current = setTimeout(() => setSwapNote(null), 8000);
   };
 
   // ----- boards -----
-  // snap = { plans, cfg, players } so history entries render the same way.
-  const halfBoard = (h, snap, compact = false, interactive = false) => {
-    const gk = h === 0 ? snap.cfg.gk1 : snap.cfg.gk2;
+  // snap = { plans, slots, cfg, players } so history entries render the same way.
+  const boardFor = (h, snap, compact = false, interactive = false) => {
+    const st = timingOf(snap.cfg);
+    const gk = st.gks[h];
     const grid = [];
     let anyOut = false;
-    for (let s = 0; s < SEGS; s++) {
-      const t = h * SEGS + s;
+    for (let s = 0; s < st.S; s++) {
+      const t = h * st.S + s;
       const col = { GK: [gk], D: [], M: [], F: [], B: [], O: [] };
       for (const [n, r] of Object.entries(snap.plans[h][s])) col[r].push(n);
       for (const p of snap.players) {
@@ -375,7 +453,7 @@ export default function LineupSolver() {
           <thead>
             <tr>
               <th className={`text-left ${pad} text-slate-500 font-medium w-20`}></th>
-              {SEG_LABEL.map((l, s) => (
+              {st.segLabels.map((l, s) => (
                 <th key={s} className={`${pad} text-slate-600 font-semibold border-b-2 border-slate-300`}>{l}</th>
               ))}
             </tr>
@@ -413,59 +491,22 @@ export default function LineupSolver() {
       </div>
     );
   };
-  const current = result ? { plans: result.plans, slots, cfg, players } : null;
 
-  // ----- field view with named positions -----
-  // Swap two players in one segment. Same row: swap sides, carried through
-  // the half. Different rows or the bench: exchange roles and spots in this
-  // segment only, then re-check the hard rules.
-  const doSwap = (h, s, a, b) => {
-    if (!slots || a === b) return;
-    const seg = current.plans[h][s];
-    const ra = seg[a], rb = seg[b];
-    if (ra === undefined && rb === undefined) { setPick(null); return; }
-    if (ra !== undefined && ra === rb) {
-      setSol({ ...sol, slots: swapSlots(slots, h, s, slots[h][s][a], slots[h][s][b]) });
-      setPick(null);
-      return;
-    }
-    const nseg = { ...seg };
-    const nsl = { ...slots[h][s] };
-    const sa = nsl[a], sb = nsl[b];
-    if (rb !== undefined) { nseg[a] = rb; nsl[a] = sb; } else { delete nseg[a]; delete nsl[a]; }
-    if (ra !== undefined) { nseg[b] = ra; nsl[b] = sa; } else { delete nseg[b]; delete nsl[b]; }
-    const plans = result.plans.map((half, hh) => half.map((sg, ss) => (hh === h && ss === s ? nseg : sg)));
-    const nslots = slots.map((half, hh) => half.map((sg, ss) => (hh === h && ss === s ? nsl : sg)));
-    setSol({ ...sol, result: { ...result, plans }, slots: nslots, edited: true });
-    setPick(null);
-    // Tell the coach what the swap did to minutes and to the hard rules.
-    const before = minutesFor(result, players, cfg);
-    const after = minutesFor({ plans }, players, cfg);
-    const hardCount = checkLineup(plans, players, cfg, rules).filter((i) => i.level === "hard").length;
-    const line = (n) => (before[n].min === after[n].min
-      ? `${n}: ${after[n].min} min (unchanged)`
-      : `${n}: ${before[n].min} → ${after[n].min} min (${after[n].min > before[n].min ? "+" : ""}${after[n].min - before[n].min})`);
-    setSwapNote({
-      title: ra !== undefined && rb !== undefined ? `Swapped ${a} and ${b} in ${SEG_LABEL[s]} of the ${h === 0 ? "1st" : "2nd"} half` : `${rb === undefined ? b : a} on for ${rb === undefined ? a : b} in ${SEG_LABEL[s]} of the ${h === 0 ? "1st" : "2nd"} half`,
-      lines: [line(a), line(b)],
-      hardCount,
-    });
-    clearTimeout(swapTimer.current);
-    swapTimer.current = setTimeout(() => setSwapNote(null), 8000);
-  };
   // Substitution markers for one segment: who comes off at the end of it and
   // who comes on in their place. Off and on are set differences between this
   // segment and the next; pairs are matched by named spot first, then by
   // role, then whatever is left, so hand edits never leave a dangling marker.
   const subsFor = (h, s, snap) => {
+    const st = timingOf(snap.cfg);
     const seg = snap.plans[h][s];
     const sl = (snap.slots && snap.slots[h][s]) || {};
-    const t = h * SEGS + s;
+    const t = h * st.S + s;
     const off = {}, moves = {};
     let comingOn = [];
-    if (t + 1 < 2 * SEGS) {
-      const next = snap.plans[Math.floor((t + 1) / SEGS)][(t + 1) % SEGS];
-      const nsl = (snap.slots && snap.slots[Math.floor((t + 1) / SEGS)][(t + 1) % SEGS]) || {};
+    if (t + 1 < st.T) {
+      const nh = Math.floor((t + 1) / st.S), ns = (t + 1) % st.S;
+      const next = snap.plans[nh][ns];
+      const nsl = (snap.slots && snap.slots[nh][ns]) || {};
       const offList = Object.keys(seg).filter((n) => next[n] === undefined);
       comingOn = Object.keys(next).filter((n) => seg[n] === undefined).sort();
       const unpaired = new Set(comingOn);
@@ -473,7 +514,7 @@ export default function LineupSolver() {
       for (const n of offList) { const m = [...unpaired].find((m) => nsl[m] === sl[n]); if (m) take(n, m); }
       for (const n of offList) if (!off[n]) { const m = [...unpaired].find((m) => next[m] === seg[n]); if (m) take(n, m); }
       for (const n of offList) if (!off[n]) { const m = [...unpaired][0]; if (m) take(n, m); else off[n] = true; }
-      if (s < SEGS - 1) for (const n of Object.keys(seg)) {
+      if (s < st.S - 1) for (const n of Object.keys(seg)) {
         if (next[n] !== undefined && nsl[n] !== sl[n]) moves[n] = nsl[n];
       }
     }
@@ -481,7 +522,7 @@ export default function LineupSolver() {
   };
   const chip = (name, slot, h, s, interactive, compact, sub = {}) => {
     const selected = pick && pick.h === h && pick.s === s && pick.name === name;
-    const sameRow = pick && pick.h === h && pick.s === s && !selected;
+    const sameSeg = pick && pick.h === h && pick.s === s && !selected;
     const size = compact ? "text-[9px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]";
     const off = sub.off && sub.off[name];
     const move = sub.moves && sub.moves[name];
@@ -492,12 +533,12 @@ export default function LineupSolver() {
     const Tag = interactive ? "button" : "div";
     return (
       <Tag key={slot} draggable={interactive || undefined}
-        onClick={interactive ? () => (pick ? (sameRow ? doSwap(h, s, pick.name, name) : setPick({ h, s, name })) : setPick({ h, s, name })) : undefined}
+        onClick={interactive ? () => (pick ? (sameSeg ? doSwap(h, s, pick.name, name) : setPick({ h, s, name })) : setPick({ h, s, name })) : undefined}
         onDragStart={interactive ? (e) => { setPick({ h, s, name }); e.dataTransfer.effectAllowed = "move"; } : undefined}
-        onDragOver={interactive ? (e) => { if (sameRow) e.preventDefault(); } : undefined}
+        onDragOver={interactive ? (e) => { if (sameSeg) e.preventDefault(); } : undefined}
         onDrop={interactive ? (e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, name); } : undefined}
         title={interactive ? `${slotName(slot)} — tap or drag onto another player in this segment to swap` : slotName(slot)}
-        className={`rounded-md text-slate-900 text-center leading-tight shadow-sm ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameRow && interactive ? "ring-2 ring-white/70" : ""}`}>
+        className={`rounded-md text-slate-900 text-center leading-tight shadow-sm ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameSeg && interactive ? "ring-2 ring-white/70" : ""}`}>
         <span className="block font-semibold">{name}</span>
         <span className="block text-slate-500">{slot}</span>
         {off && <span className="block font-semibold text-amber-900 print:text-black">▼ off{off !== true ? ` · ${off} on` : ""}</span>}
@@ -506,10 +547,11 @@ export default function LineupSolver() {
     );
   };
   const fieldView = (h, s, snap, interactive = false, compact = false) => {
+    const st = timingOf(snap.cfg);
     const seg = snap.plans[h][s];
     const sl = (snap.slots && snap.slots[h][s]) || {};
-    const gk = h === 0 ? snap.cfg.gk1 : snap.cfg.gk2;
-    const t = h * SEGS + s;
+    const gk = st.gks[h];
+    const t = h * st.S + s;
     const sub = subsFor(h, s, snap);
     const bench = snap.players
       .filter((p) => seg[p.name] === undefined && p.name !== gk && available(p, t))
@@ -522,7 +564,7 @@ export default function LineupSolver() {
     return (
       <div className={`rounded-xl bg-emerald-700 text-white ${compact ? "p-1.5" : "p-2.5"}`}>
         <div className={`flex justify-between font-semibold ${compact ? "text-[10px] mb-1" : "text-xs mb-1.5"}`}>
-          <span>{h === 0 ? "1st half" : "2nd half"} · {SEG_LABEL[s]}</span>
+          <span>{st.periodName(h)} · {st.segLabels[s]}</span>
           <span className="opacity-80">{gk} in goal</span>
         </div>
         <div className={`rounded-lg border-2 border-white/60 ${compact ? "p-1 space-y-1" : "p-2 space-y-2"}`}>
@@ -558,6 +600,12 @@ export default function LineupSolver() {
       </div>
     );
   };
+  const allFields = (snap, interactive, compact) => {
+    const st = timingOf(snap.cfg);
+    const out = [];
+    for (let h = 0; h < st.P; h++) for (let s = 0; s < st.S; s++) out.push(<div key={`${h}-${s}`}>{fieldView(h, s, snap, interactive, compact)}</div>);
+    return out;
+  };
 
   const minutesTable = (rows, ps) => (
     <table className="w-full text-sm">
@@ -588,14 +636,12 @@ export default function LineupSolver() {
     <div className="hidden print:block p-2 text-slate-900">
       <div className="flex items-baseline justify-between mb-2">
         <h1 className="text-xl font-extrabold text-emerald-950">Greyhounds lineup</h1>
-        <span className="text-xs text-slate-500">Subs at 6:00, 12:00 and 18:00 each half</span>
+        <span className="text-xs text-slate-500">{tm.P} {tm.type} of {tm.L} min · subs at {listWithAnd(tm.subTimes)}</span>
       </div>
-      {[0, 1].map((h) => (
+      {Array.from({ length: tm.P }, (_, h) => (
         <section key={h} className="mb-3">
-          <h2 className="text-sm font-bold text-emerald-950 mb-1">
-            {h === 0 ? "First half" : "Second half"} · {h === 0 ? cfg.gk1 : cfg.gk2} in goal
-          </h2>
-          {halfBoard(h, current, true)}
+          <h2 className="text-sm font-bold text-emerald-950 mb-1">{tm.periodName(h)} · {tm.gks[h]} in goal</h2>
+          {boardFor(h, current, true)}
         </section>
       ))}
       {mins && (
@@ -607,11 +653,7 @@ export default function LineupSolver() {
       <section className="break-before-page">
         <h2 className="text-sm font-bold text-emerald-950 mb-1">Field positions by segment</h2>
         <p className="text-[10px] text-slate-600 mb-2">Dashed box ▼ = comes off at the end of this segment, with who comes on for them. Underlined ▲ on the bench = coming on next.</p>
-        <div className="grid grid-cols-2 gap-2">
-          {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
-            <div key={`${h}-${s}`}>{fieldView(h, s, current, false, true)}</div>
-          )))}
-        </div>
+        <div className="grid grid-cols-2 gap-2">{allFields(current, false, true)}</div>
       </section>
     </div>
   );
@@ -630,6 +672,12 @@ export default function LineupSolver() {
   const btn = "px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 font-medium disabled:opacity-40 disabled:hover:bg-white";
   const primary = "px-4 py-2 rounded-lg bg-emerald-900 text-white font-semibold hover:bg-emerald-800 disabled:opacity-60";
   const solveLabel = solving ? "Solving…" : "Solve";
+  const tabs = [
+    ...Array.from({ length: tm.P }, (_, i) => [`p${i}`, tm.periodName(i)]),
+    ["field", "Field"], ["minutes", "Minutes"], ["history", `History (${history.length})`],
+  ];
+  const lineupTab = tab !== "history";
+  const periodTab = tab.startsWith("p") ? +tab.slice(1) : null;
 
   return (
     <div className="min-h-screen bg-stone-50 print:bg-white text-slate-900" style={{ fontFamily: "ui-sans-serif, system-ui" }}>
@@ -654,7 +702,9 @@ export default function LineupSolver() {
         <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-3xl font-extrabold tracking-tight text-emerald-950">Greyhounds lineup solver</h1>
-            <p className="text-slate-600 mt-1">Eight segments, subs at 6:00, 12:00 and 18:00. Change any constraint and re-solve.</p>
+            <p className="text-slate-600 mt-1">
+              {tm.P} {tm.type} of {tm.L} minutes, {tm.T} segments, subs at {listWithAnd(tm.subTimes)} each {tm.type === "halves" ? "half" : "quarter"}. Change any setting and re-solve.
+            </p>
             <div className="mt-2 inline-flex rounded-lg border border-slate-300 bg-white overflow-hidden text-sm">
               {GAME_SIZES.map((n) => (
                 <button key={n} onClick={() => setSize(n)}
@@ -674,7 +724,7 @@ export default function LineupSolver() {
                 <button onClick={() => setConfirmClear(false)} className={btn}>Keep</button>
               </span>
             ) : (
-              <button onClick={() => setConfirmClear(true)} className={btn} title="Reset players, goalies and constraints to the defaults and forget the saved setup">Clear setup</button>
+              <button onClick={() => setConfirmClear(true)} className={btn} title="Reset players, goalies, game and constraints to the defaults and forget the saved setup">Clear setup</button>
             )}
             <button onClick={() => { const s = Math.floor(Math.random() * 1e6); setSeed(s); run(s); }} disabled={solving}
               className="px-3 py-2 rounded-lg border border-emerald-900 bg-white text-emerald-900 hover:bg-emerald-50 font-medium disabled:opacity-40">Shuffle</button>
@@ -703,13 +753,13 @@ export default function LineupSolver() {
             )}
 
             <div className="flex flex-wrap gap-2">
-              {["First half", "Second half", "Field", "Minutes", `History (${history.length})`].map((t, i) => (
-                <button key={t} onClick={() => setTab(i)}
-                  className={`px-4 py-2 rounded-lg font-semibold ${tab === i ? "bg-emerald-900 text-white" : "bg-white border border-slate-300 text-slate-700 hover:bg-slate-100"}`}>{t}</button>
+              {tabs.map(([key, label]) => (
+                <button key={key} onClick={() => setTab(key)}
+                  className={`px-4 py-2 rounded-lg font-semibold ${tab === key ? "bg-emerald-900 text-white" : "bg-white border border-slate-300 text-slate-700 hover:bg-slate-100"}`}>{label}</button>
               ))}
             </div>
 
-            {tab < 4 && (
+            {lineupTab && (
               <>
                 {stale && (
                   <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
@@ -765,38 +815,34 @@ export default function LineupSolver() {
                 {result && (
                   <>
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
-                      {tab < 2 && (
+                      {periodTab !== null && (
                         <>
                           <p className="text-sm text-slate-500 mb-3">
-                            {tab === 0 ? cfg.gk1 : cfg.gk2} is in goal. Reading down a column shows the whole field for that stretch. Tap a name, then another name in the same column (bench included), to swap them for that segment; the hard rules are re-checked and the Field tab follows.
+                            {tm.gks[periodTab]} is in goal. Reading down a column shows the whole field for that stretch. Tap a name, then another name in the same column (bench included), to swap them for that segment; the hard rules are re-checked and the Field tab follows.
                           </p>
-                          {halfBoard(tab, current, false, true)}
+                          {boardFor(periodTab, current, false, true)}
                         </>
                       )}
-                      {tab === 2 && (
+                      {tab === "field" && (
                         <>
                           <p className="text-sm text-slate-500 mb-3">
-                            Tap a player, then any other player in that segment, to swap them. Same-row swaps just change sides and carry forward through the half. Swapping across rows or with the bench changes that segment only, and the hard rules are re-checked below. No re-solve needed.
+                            Tap a player, then any other player in that segment, to swap them. Same-row swaps just change sides and carry forward through the {tm.type === "halves" ? "half" : "quarter"}. Swapping across rows or with the bench changes that segment only, and the hard rules are re-checked below. No re-solve needed.
                             <span className="block mt-1"><span className="inline-block w-3 h-3 rounded-sm bg-amber-200 border border-amber-500 align-middle mr-1" />▼ comes off at the end of this segment, with who comes on for them. On the bench, ▲ marks who is coming on next.</span>
                           </p>
-                          <div className="grid sm:grid-cols-2 gap-3">
-                            {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
-                              <div key={`${h}-${s}`}>{fieldView(h, s, current, true)}</div>
-                            )))}
-                          </div>
+                          <div className="grid sm:grid-cols-2 gap-3">{allFields(current, true, false)}</div>
                         </>
                       )}
-                      {tab === 3 && mins && minutesTable(mins, players)}
+                      {tab === "minutes" && mins && minutesTable(mins, players)}
                     </div>
                     <p className="text-xs text-slate-500">
-                      Built in: playing time is shared evenly among everyone who's here, nobody sits twice in a row (including across halftime), goalies get a full half in net plus their field segments, and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
+                      Built in: playing time is shared evenly among everyone who's here, nobody sits twice in a row (including across {tm.breakName}), goalies get a full {tm.type === "halves" ? "half" : "quarter"} in net plus about half of each other period on the field, and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
                     </p>
                   </>
                 )}
               </>
             )}
 
-            {tab === 4 && (
+            {tab === "history" && (
               <div className="space-y-4">
                 <div className="bg-white rounded-xl border border-slate-200 p-4">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -836,51 +882,50 @@ export default function LineupSolver() {
                   )}
                 </div>
 
-                {history.map((g) => (
-                  <div key={g.id} className="bg-white rounded-xl border border-slate-200 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <button onClick={() => setOpenGame(openGame === g.id ? null : g.id)} className="text-left">
-                        <span className="font-bold text-emerald-950">{g.label || "Game"}</span>
-                        <span className="text-slate-500 text-sm ml-2">{g.date}</span>
-                        <span className="block text-xs text-slate-500">
-                          {g.cfg.size ? `${g.cfg.size}v${g.cfg.size} ${formationLabel(g.cfg.formation)} · ` : ""}{g.cfg.gk1} then {g.cfg.gk2} in goal
-                          {g.players.some((p) => p.out) && ` · out: ${g.players.filter((p) => p.out).map((p) => p.name).join(", ")}`}
-                        </span>
-                      </button>
-                      <div className="flex gap-2 items-center text-sm">
-                        <button onClick={() => setOpenGame(openGame === g.id ? null : g.id)} className={`${btn} py-1`}>
-                          {openGame === g.id ? "Hide" : "Show"}
+                {history.map((g) => {
+                  const gt = timingOf(g.cfg);
+                  const snap = { plans: g.plans, slots: g.slots, cfg: g.cfg, players: g.players };
+                  return (
+                    <div key={g.id} className="bg-white rounded-xl border border-slate-200 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <button onClick={() => setOpenGame(openGame === g.id ? null : g.id)} className="text-left">
+                          <span className="font-bold text-emerald-950">{g.label || "Game"}</span>
+                          <span className="text-slate-500 text-sm ml-2">{g.date}</span>
+                          <span className="block text-xs text-slate-500">
+                            {g.cfg.size ? `${g.cfg.size}v${g.cfg.size} ${formationLabel(g.cfg.formation)} · ` : ""}
+                            {gt.P} {gt.type} · in goal: {gt.gks.join(", ")}
+                            {g.players.some((p) => p.out) && ` · out: ${g.players.filter((p) => p.out).map((p) => p.name).join(", ")}`}
+                          </span>
                         </button>
-                        {confirmDelete === g.id ? (
-                          <>
-                            <button onClick={() => deleteGame(g.id)} className="px-3 py-1 rounded-lg bg-red-700 text-white font-medium">Delete</button>
-                            <button onClick={() => setConfirmDelete(null)} className={`${btn} py-1`}>Keep</button>
-                          </>
-                        ) : (
-                          <button onClick={() => setConfirmDelete(g.id)} className="text-slate-400 hover:text-red-600 px-1" title="Delete game">✕</button>
-                        )}
+                        <div className="flex gap-2 items-center text-sm">
+                          <button onClick={() => setOpenGame(openGame === g.id ? null : g.id)} className={`${btn} py-1`}>
+                            {openGame === g.id ? "Hide" : "Show"}
+                          </button>
+                          {confirmDelete === g.id ? (
+                            <>
+                              <button onClick={() => deleteGame(g.id)} className="px-3 py-1 rounded-lg bg-red-700 text-white font-medium">Delete</button>
+                              <button onClick={() => setConfirmDelete(null)} className={`${btn} py-1`}>Keep</button>
+                            </>
+                          ) : (
+                            <button onClick={() => setConfirmDelete(g.id)} className="text-slate-400 hover:text-red-600 px-1" title="Delete game">✕</button>
+                          )}
+                        </div>
                       </div>
+                      {openGame === g.id && (
+                        <div className="mt-3 space-y-4">
+                          {Array.from({ length: gt.P }, (_, h) => (
+                            <div key={h}>
+                              <p className="text-sm font-semibold text-slate-600 mb-1">{gt.periodName(h)}</p>
+                              {boardFor(h, snap, true)}
+                            </div>
+                          ))}
+                          {g.slots && <div className="grid sm:grid-cols-2 gap-2">{allFields(snap, false, true)}</div>}
+                          {minutesTable(g.minutes || {}, g.players)}
+                        </div>
+                      )}
                     </div>
-                    {openGame === g.id && (
-                      <div className="mt-3 space-y-4">
-                        {[0, 1].map((h) => (
-                          <div key={h}>
-                            <p className="text-sm font-semibold text-slate-600 mb-1">{h === 0 ? "First half" : "Second half"}</p>
-                            {halfBoard(h, { plans: g.plans, cfg: g.cfg, players: g.players }, true)}
-                          </div>
-                        ))}
-                        {g.slots && (
-                          <div className="grid sm:grid-cols-2 gap-2">
-                            {[0, 1].map((h) => [0, 1, 2, 3].map((s) => (
-                              <div key={`${h}-${s}`}>{fieldView(h, s, { plans: g.plans, slots: g.slots, cfg: g.cfg, players: g.players }, false, true)}</div>
-                            )))}
-                          </div>
-                        )}
-                        {minutesTable(g.minutes || {}, g.players)}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -891,7 +936,7 @@ export default function LineupSolver() {
               <div className="flex items-center justify-between mb-1">
                 <h2 className="font-bold text-emerald-950">Players</h2>
                 <div className="flex gap-1">
-                  <button onClick={exportSetup} disabled={players.length === 0} className={`${btn} text-xs py-1 px-2`} title="Download players, goalies, formation and constraints as a file to share with another coach">Export</button>
+                  <button onClick={exportSetup} disabled={players.length === 0} className={`${btn} text-xs py-1 px-2`} title="Download players, goalies, game settings and constraints as a file to share with another coach">Export</button>
                   <button onClick={() => setupImportRef.current?.click()} className={`${btn} text-xs py-1 px-2`}>Import</button>
                   <input ref={setupImportRef} type="file" accept="application/json" className="hidden"
                     onChange={(e) => { importSetup(e.target.files?.[0]); e.target.value = ""; }} />
@@ -935,7 +980,7 @@ export default function LineupSolver() {
                       <td className="text-center">
                         <select value={p.out == null ? "" : String(p.out)} onChange={(e) => setOut(i, e.target.value)}
                           className={`border rounded px-1 bg-white max-w-[7.5rem] ${p.out ? "border-red-300 text-red-700" : "border-slate-200"}`}>
-                          {OUT_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                          {outOptions.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                         </select>
                       </td>
                       <td className="text-center">
@@ -952,6 +997,34 @@ export default function LineupSolver() {
                   className="px-3 py-1 rounded-md bg-emerald-900 text-white text-sm font-medium hover:bg-emerald-800 disabled:opacity-40">Add</button>
               </form>
               <p className="text-[11px] text-slate-400 mt-1">{players.length} players · {cfg.size}v{cfg.size} needs {cfg.size} on the field per segment</p>
+            </section>
+
+            <section className="bg-white rounded-xl border border-slate-200 p-4">
+              <h2 className="font-bold text-emerald-950 mb-1">Game clock</h2>
+              <p className="text-xs text-slate-500 mb-2">Substitutions happen between segments. Player minutes and the boards follow from this.</p>
+              <div className="inline-flex rounded-lg border border-slate-300 bg-white overflow-hidden text-sm mb-3">
+                {Object.keys(PERIOD_TYPES).map((k) => (
+                  <button key={k} onClick={() => setPeriodType(k)}
+                    className={`px-3 py-1.5 font-semibold capitalize ${cfg.periodType === k ? "bg-emerald-900 text-white" : "text-slate-700 hover:bg-slate-100"}`}>{k}</button>
+                ))}
+              </div>
+              <div className="space-y-2 text-sm">
+                <label className="flex items-center justify-between gap-2">
+                  <span>Minutes per {tm.type === "halves" ? "half" : "quarter"}</span>
+                  <input type="number" min={1} max={60} value={cfg.periodMin}
+                    onChange={(e) => setCfg({ ...cfg, periodMin: Math.max(1, +e.target.value || 0) })}
+                    className="w-16 border border-slate-300 rounded px-1 py-0.5" />
+                </label>
+                <label className="flex items-center justify-between gap-2">
+                  <span>Segments per {tm.type === "halves" ? "half" : "quarter"}</span>
+                  <input type="number" min={1} max={8} value={cfg.segsPerPeriod}
+                    onChange={(e) => setCfg({ ...cfg, segsPerPeriod: Math.max(1, Math.min(8, +e.target.value || 1)) })}
+                    className="w-16 border border-slate-300 rounded px-1 py-0.5" />
+                </label>
+                <p className="text-xs text-slate-500">
+                  {tm.T} segments of {[...new Set(tm.lens)].join(" or ")} min. {tm.subTimes.length ? `Subs at ${listWithAnd(tm.subTimes)} each ${tm.type === "halves" ? "half" : "quarter"}.` : "No subs within a period."}
+                </p>
+              </div>
             </section>
 
             <section className="bg-white rounded-xl border border-slate-200 p-4">
@@ -984,17 +1057,17 @@ export default function LineupSolver() {
             <section className="bg-white rounded-xl border border-slate-200 p-4">
               <h2 className="font-bold text-emerald-950 mb-3">Goalies</h2>
               <div className="space-y-2 text-sm">
-                {["gk1", "gk2"].map((k, i) => (
-                  <label key={k} className="flex items-center justify-between gap-2">
-                    <span>{i === 0 ? "First half in goal" : "Second half in goal"}</span>
-                    <select value={cfg[k]} onChange={(e) => setCfg({ ...cfg, [k]: e.target.value })}
-                      className={`border rounded-md px-2 py-1 bg-white ${cfg[k] ? "border-slate-300" : "border-red-300"}`}>
+                {cfg.gks.map((g, i) => (
+                  <label key={i} className="flex items-center justify-between gap-2">
+                    <span>{tm.periodName(i)} in goal</span>
+                    <select value={g} onChange={(e) => setGk(i, e.target.value)}
+                      className={`border rounded-md px-2 py-1 bg-white ${g ? "border-slate-300" : "border-red-300"}`}>
                       <option value="">Pick a goalie</option>
                       {players.map((p) => <option key={p.name} value={p.name}>{p.name}{p.out ? " (out)" : ""}</option>)}
                     </select>
                   </label>
                 ))}
-                <p className="text-xs text-slate-500">Each goalie also gets two field segments in their other half.</p>
+                <p className="text-xs text-slate-500">Each goalie also plays about half of every {tm.type === "halves" ? "half" : "quarter"} they're not in net.</p>
               </div>
             </section>
 
