@@ -422,15 +422,6 @@ export function checkLineup(plans, players, cfg, rules) {
         note(`${n} moves from ${ROLE_WORD[segAt(t)[n]]} to ${ROLE_WORD[segAt(t + 1)[n]]} without leaving the field (${segLabel(t + 1)}).`);
       }
     }
-    // On for a single segment and straight back off (period starts exempt).
-    // The solver avoids this wherever the roster allows, so a note, not a rule.
-    for (let i = 0; i < P; i++) for (let s = 1; s < S - 1; s++) {
-      const t = i * S + s;
-      const here = (u) => available(p, u) && n !== gkOf(u);
-      if (here(t - 1) && here(t) && here(t + 1) && !(n in segAt(t - 1)) && n in segAt(t) && !(n in segAt(t + 1))) {
-        note(`${n} comes on for ${segLabel(t)} and straight back off.`);
-      }
-    }
     // Outfielders here for the whole game split their time evenly across periods.
     if (!share.reason && share.avail[n] === T) {
       const per = Array.from({ length: P }, (_, i) => {
