@@ -348,8 +348,6 @@ export default function LineupSolver() {
   const issues = useMemo(() => (result && edited ? checkLineup(result.plans, players, cfg, rules) : []), [result, edited, players, cfg, rules]);
   const hardIssues = issues.filter((i) => i.level === "hard");
   const noteIssues = issues.filter((i) => i.level === "note");
-  // On-and-straight-off subs the solver could not avoid with this roster.
-  const cameos = useMemo(() => (result && !edited ? checkLineup(result.plans, players, cfg, rules).filter((i) => i.text.includes("straight back off")) : []), [result, edited, players, cfg, rules]);
   const undoEdits = () => {
     if (!sol || !sol.original) return;
     setSol({ ...sol, result: sol.original.result, slots: sol.original.slots, edited: false });
@@ -830,15 +828,6 @@ export default function LineupSolver() {
                     <p className="text-sm mt-1">
                       {failReason || "Loosen something and solve again — the usual culprits are an anchor with too few eligible players, a cap that's too tight, or too many Never restrictions on the same position."}
                     </p>
-                  </div>
-                )}
-                {cameos.length > 0 && (
-                  <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-amber-900">
-                    <p className="font-semibold">{cameos.length} sub{cameos.length === 1 ? "" : "s"} come{cameos.length === 1 ? "s" : ""} on for a single segment and straight back off.</p>
-                    <p className="text-sm mt-1">The solver avoids this wherever it can, but with this many players sharing the field evenly and nobody sitting twice in a row, there is no way round it.</p>
-                    <ul className="list-disc ml-5 mt-2 text-sm space-y-0.5">
-                      {cameos.map((i, k) => <li key={k}>{i.text}</li>)}
-                    </ul>
                   </div>
                 )}
                 {result && edited && (
