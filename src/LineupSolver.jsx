@@ -700,7 +700,7 @@ export default function LineupSolver() {
         {snap.slots && (
           <section className="break-before-page">
             <h2 className="text-sm font-bold text-emerald-950 mb-1">Field positions by segment</h2>
-            <p className="text-[10px] text-slate-600 mb-2">Each chart is the field after that whistle. A yellow dashed box is a player who just came on, with who they replaced underneath.</p>
+            <p className="text-[10px] text-slate-600 mb-2">Dashed box: just came on, for the player named underneath.</p>
             <div className="grid grid-cols-2 gap-x-2 gap-y-1">{allFields(snap, false, true)}</div>
           </section>
         )}
@@ -756,7 +756,7 @@ export default function LineupSolver() {
           <div>
             <h1 className="text-3xl font-extrabold tracking-tight text-emerald-950">Greyhounds lineup solver</h1>
             <p className="text-slate-600 mt-1">
-              {tm.P} {tm.type} of {tm.L} minutes, {tm.T} segments, {subsPhrase}. Change any setting and re-solve.
+              {tm.P} {tm.type} of {tm.L} minutes, {subsPhrase}.
             </p>
             <div className="mt-2 inline-flex rounded-lg border border-slate-300 bg-white overflow-hidden text-sm">
               {GAME_SIZES.map((n) => (
@@ -826,8 +826,7 @@ export default function LineupSolver() {
                 {reshaped && (
                   <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <p className="font-semibold">Game format changed.</p>
-                      <p className="text-sm mt-1">The previous lineup was built for a different number of segments, team size or formation, so it can't be shown. Solve again to build a new one.</p>
+                      <p className="font-semibold">Game format changed. Solve again for a new lineup.</p>
                     </div>
                     <button onClick={() => run(seed)} disabled={solving} className={primary}>{solveLabel}</button>
                   </div>
@@ -836,19 +835,14 @@ export default function LineupSolver() {
                   <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p className="font-semibold">Setup changed since this lineup was solved.</p>
-                      <p className="text-sm mt-1">Keep using it as is: hand edits, printing and history all still work, and anything it now breaks is listed below. Or solve again for a fresh one.</p>
+                      <p className="text-sm mt-1">Keep using it, or solve again.</p>
                     </div>
                     <button onClick={() => askRun(seed)} disabled={solving} className={primary}>{solveLabel}</button>
                   </div>
                 )}
                 {!sol && !solving && (
                   <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-slate-600">
-                    <p className="font-semibold text-slate-800">No lineup yet.</p>
-                    <p className="text-sm mt-1 mb-3">
-                      {players.length === 0
-                        ? "Add your players on the right (or import a setup another coach exported), pick goalies, then solve."
-                        : "Mark anyone who's out, check the goalies, then solve."}
-                    </p>
+                    <p className="font-semibold text-slate-800 mb-3">No lineup yet.</p>
                     <button onClick={() => run(seed)} className={primary}>Solve</button>
                   </div>
                 )}
@@ -857,7 +851,7 @@ export default function LineupSolver() {
                   <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-amber-900">
                     <p className="font-semibold">No lineup satisfies this setup.</p>
                     <p className="text-sm mt-1">
-                      {failReason || "Loosen something and solve again — the usual culprits are an anchor with too few eligible players, a cap that's too tight, or too many Never restrictions on the same position."}
+                      {failReason || "Loosen a constraint and solve again."}
                     </p>
                   </div>
                 )}
@@ -866,7 +860,7 @@ export default function LineupSolver() {
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <p className="font-semibold">
                         {hardIssues.length
-                          ? `${edited ? "Hand-edited lineup" : "This lineup"} breaks ${hardIssues.length} hard rule${hardIssues.length === 1 ? "" : "s"}. It still works as it is.`
+                          ? `${edited ? "Hand-edited lineup" : "This lineup"} breaks ${hardIssues.length} hard rule${hardIssues.length === 1 ? "" : "s"}.`
                           : "Hand-edited lineup. All hard rules still hold."}
                       </p>
                       {edited && <button onClick={undoEdits} className={btn}>Undo edits</button>}
@@ -888,26 +882,16 @@ export default function LineupSolver() {
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
                       {periodTab !== null && (
                         <>
-                          <p className="text-sm text-slate-500 mb-3">
-                            {tm.gks[periodTab]} is in goal. Reading down a column shows the whole field for that stretch. Tap a name, then another name in the same column (bench included), to swap them for that segment; the hard rules are re-checked and the Field tab follows.
-                          </p>
                           {boardFor(periodTab, current, false, true)}
                         </>
                       )}
                       {tab === "field" && (
                         <>
-                          <p className="text-sm text-slate-500 mb-3">
-                            Tap a player, then any other player in that segment, to swap them. Same-row swaps just change sides and carry forward through the {tm.type === "halves" ? "half" : "quarter"}. Swapping across rows or with the bench changes that segment only, and the hard rules are re-checked below. No re-solve needed.
-                            <span className="block mt-1"><span className="inline-block w-3 h-3 rounded-sm bg-yellow-200 border border-dashed border-slate-900 align-middle mr-1" />Each chart is the field after that whistle. A yellow dashed box is a player who just came on, with who they replaced underneath.</span>
-                          </p>
                           <div className="grid sm:grid-cols-2 gap-3">{allFields(current, true, false)}</div>
                         </>
                       )}
                       {tab === "minutes" && mins && minutesTable(mins, players)}
                     </div>
-                    <p className="text-xs text-slate-500">
-                      Built in: playing time is shared evenly among everyone who's here, nobody sits twice in a row (including across {tm.breakName}), nobody comes on for a single segment and straight back off wherever the roster allows it, goalies get a full {tm.type === "halves" ? "half" : "quarter"} in net plus about half of each other period on the field, and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
-                    </p>
                   </>
                 )}
               </>
@@ -926,7 +910,7 @@ export default function LineupSolver() {
                     </div>
                   </div>
                   {history.length === 0 ? (
-                    <p className="text-sm text-slate-500">No games yet. Solve a lineup, then use “Commit to history” to record it. History lives in this browser; export it to share with another coach.</p>
+                    <p className="text-sm text-slate-500">No games yet.</p>
                   ) : (
                     <table className="w-full text-sm">
                       <thead>
@@ -1014,7 +998,6 @@ export default function LineupSolver() {
                     onChange={(e) => { importSetup(e.target.files?.[0]); e.target.value = ""; }} />
                 </div>
               </div>
-              <p className="text-xs text-slate-500 mb-2">First and second choice of position nudge the solver (second counts half); Never is a hard rule. Mark anyone absent or leaving early. Tap a name to edit it.</p>
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-slate-500">
@@ -1068,12 +1051,11 @@ export default function LineupSolver() {
                 <button type="submit" disabled={!newName.trim() || players.some((p) => p.name === newName.trim())}
                   className="px-3 py-1 rounded-md bg-emerald-900 text-white text-sm font-medium hover:bg-emerald-800 disabled:opacity-40">Add</button>
               </form>
-              <p className="text-[11px] text-slate-400 mt-1">{players.length} players · {cfg.size}v{cfg.size} needs {cfg.size} on the field per segment</p>
+              <p className="text-[11px] text-slate-400 mt-1">{players.length} players</p>
             </section>
 
             <section className="bg-white rounded-xl border border-slate-200 p-4">
               <h2 className="font-bold text-emerald-950 mb-1">Game clock</h2>
-              <p className="text-xs text-slate-500 mb-2">Substitutions happen between segments. Player minutes and the boards follow from this.</p>
               <div className="inline-flex rounded-lg border border-slate-300 bg-white overflow-hidden text-sm mb-3">
                 {Object.keys(PERIOD_TYPES).map((k) => (
                   <button key={k} onClick={() => setPeriodType(k)}
@@ -1101,7 +1083,6 @@ export default function LineupSolver() {
 
             <section className="bg-white rounded-xl border border-slate-200 p-4">
               <h2 className="font-bold text-emerald-950 mb-1">Formation</h2>
-              <p className="text-xs text-slate-500 mb-2">Defenders, midfielders and forwards for {cfg.size}v{cfg.size}. The goalie is extra.</p>
               <div className="flex flex-wrap gap-1 mb-2">
                 {FORMATION_PRESETS[cfg.size].map(([D, M, F]) => {
                   const on = cfg.formation.D === D && cfg.formation.M === M && cfg.formation.F === F;
@@ -1139,7 +1120,6 @@ export default function LineupSolver() {
                     </select>
                   </label>
                 ))}
-                <p className="text-xs text-slate-500">Each goalie also plays about half of every {tm.type === "halves" ? "half" : "quarter"} they're not in net.</p>
               </div>
             </section>
 
@@ -1151,7 +1131,6 @@ export default function LineupSolver() {
                   {picker ? "Close" : "+ Add"}
                 </button>
               </div>
-              <p className="text-xs text-slate-500 mb-3">Applied to every segment. Tap names to include or exclude them.</p>
 
               {picker && (
                 <div className="mb-3 border border-emerald-200 bg-emerald-50 rounded-lg p-2.5 space-y-2 text-sm">
@@ -1168,7 +1147,7 @@ export default function LineupSolver() {
 
               <div className="space-y-3 text-sm">
                 {rules.length === 0 && (
-                  <p className="text-slate-400 text-sm">No constraints. Any valid rotation goes.</p>
+                  <p className="text-slate-400 text-sm">No constraints.</p>
                 )}
                 {rules.map((r) => (
                   <div key={r.id} className="border border-slate-200 rounded-lg p-2.5 bg-stone-50">
