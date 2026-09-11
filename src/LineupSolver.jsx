@@ -531,44 +531,36 @@ export default function LineupSolver() {
     );
   };
 
-  // Substitution markers for one segment: who comes off at the end of it and
-  // who comes on in their place. Off and on are set differences between this
-  // segment and the next; pairs are matched by named spot first, then by
-  // role, then whatever is left, so hand edits never leave a dangling marker.
-  const subsFor = (h, s, snap) => {
-    const st = timingOf(snap.cfg);
-    const seg = snap.plans[h][s];
+  // Who just came on in this segment, and who they replaced. Arrivals are
+  // the players here who were not in the previous segment of the same
+  // period. Each is matched to a departed player by named spot first, then
+  // by role, then whatever is left, so hand edits never leave one unmatched.
+  // Returns { name: replacedName | null }; players not listed have been on
+  // since the previous segment.
+  const arrivalsFor = (h, s, snap) => {
+    if (s === 0) return {};
+    const seg = snap.plans[h][s], prev = snap.plans[h][s - 1];
     const sl = (snap.slots && snap.slots[h][s]) || {};
-    const t = h * st.S + s;
-    const off = {}, moves = {};
-    let comingOn = [];
-    if (t + 1 < st.T) {
-      const nh = Math.floor((t + 1) / st.S), ns = (t + 1) % st.S;
-      const next = snap.plans[nh][ns];
-      const nsl = (snap.slots && snap.slots[nh][ns]) || {};
-      const offList = Object.keys(seg).filter((n) => next[n] === undefined);
-      comingOn = Object.keys(next).filter((n) => seg[n] === undefined).sort();
-      const unpaired = new Set(comingOn);
-      const take = (n, m) => { off[n] = m; unpaired.delete(m); };
-      for (const n of offList) { const m = [...unpaired].find((m) => nsl[m] === sl[n]); if (m) take(n, m); }
-      for (const n of offList) if (!off[n]) { const m = [...unpaired].find((m) => next[m] === seg[n]); if (m) take(n, m); }
-      for (const n of offList) if (!off[n]) { const m = [...unpaired][0]; if (m) take(n, m); else off[n] = true; }
-      if (s < st.S - 1) for (const n of Object.keys(seg)) {
-        if (next[n] !== undefined && nsl[n] !== sl[n]) moves[n] = nsl[n];
-      }
-    }
-    return { off, comingOn, moves };
+    const psl = (snap.slots && snap.slots[h][s - 1]) || {};
+    const on = Object.keys(seg).filter((n) => prev[n] === undefined);
+    const gone = new Set(Object.keys(prev).filter((n) => seg[n] === undefined));
+    const forWhom = {};
+    const take = (n, m) => { forWhom[n] = m; gone.delete(m); };
+    for (const n of on) { const m = [...gone].find((m) => psl[m] === sl[n]); if (m) take(n, m); }
+    for (const n of on) if (!forWhom[n]) { const m = [...gone].find((m) => prev[m] === seg[n]); if (m) take(n, m); }
+    for (const n of on) if (!forWhom[n]) { const m = [...gone][0]; if (m) take(n, m); else forWhom[n] = null; }
+    return forWhom;
   };
-  const chip = (name, slot, h, s, interactive, compact, sub = {}) => {
+  // forWhom: undefined = on since the previous segment; a name = just came
+  // on for that player; null = just came on with no one-to-one match.
+  const chip = (name, slot, h, s, interactive, compact, forWhom) => {
     const selected = pick && pick.h === h && pick.s === s && pick.name === name;
     const sameSeg = pick && pick.h === h && pick.s === s && !selected;
-    const size = compact ? "text-[9px] print:text-[10px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]";
-    const off = sub.off && sub.off[name];
-    const move = sub.moves && sub.moves[name];
-    // Off: amber on screen, dashed black border in print.
-    const tone = off
-      ? "bg-amber-200 border-2 border-amber-500 print:bg-white print:border-dashed print:border-black"
-      : "bg-white border-2 border-transparent";
+    const arrived = forWhom !== undefined;
+    const size = compact ? "text-[11px] px-1.5 py-0.5 min-w-[3.4rem]" : "text-sm px-2 py-1 min-w-[4.5rem]";
+    // Just came on: yellow with a heavy dashed border, which still reads as
+    // a tinted dashed box on a black-and-white printer.
+    const tone = arrived ? "bg-yellow-200 border-[3px] border-dashed border-slate-900" : "bg-white border-2 border-slate-400";
     const Tag = interactive ? "button" : "div";
     return (
       <Tag key={slot} draggable={interactive || undefined}
@@ -577,52 +569,52 @@ export default function LineupSolver() {
         onDragOver={interactive ? (e) => { if (sameSeg) e.preventDefault(); } : undefined}
         onDrop={interactive ? (e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, name); } : undefined}
         title={interactive ? `${slotName(slot)} — tap or drag onto another player in this segment to swap` : slotName(slot)}
-        className={`rounded-md text-slate-900 text-center leading-tight shadow-sm print:shadow-none ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-400" : sameSeg && interactive ? "ring-2 ring-white/70" : ""}`}>
-        <span className="block font-semibold">{name}</span>
-        <span className="block text-slate-500 print:text-slate-800">{slot}</span>
-        {off && <span className="block font-semibold text-amber-900 print:text-black">▼ off{off !== true ? ` · ${off} on` : ""}</span>}
-        {move && !off && <span className="block text-slate-500 print:text-slate-800">→ {move} next</span>}
+        className={`rounded-md text-slate-900 text-center leading-tight ${tone} ${size} ${interactive ? "cursor-grab active:cursor-grabbing" : ""} ${selected ? "ring-2 ring-amber-500 ring-offset-1" : sameSeg && interactive ? "ring-2 ring-emerald-500" : ""}`}>
+        <span className="block font-bold">{name}</span>
+        {arrived && <span className={`block font-medium text-slate-700 ${compact ? "text-[9px]" : "text-[11px]"}`}>{forWhom ? `for ${forWhom}` : "just on"}</span>}
       </Tag>
     );
   };
+  // One segment as a picture of the field. The first segment of a period is
+  // headed as a lineup; later ones as the sub that starts them.
   const fieldView = (h, s, snap, interactive = false, compact = false) => {
     const st = timingOf(snap.cfg);
     const seg = snap.plans[h][s];
     const sl = (snap.slots && snap.slots[h][s]) || {};
     const gk = st.gks[h];
     const t = h * st.S + s;
-    const sub = subsFor(h, s, snap);
+    const forWhom = arrivalsFor(h, s, snap);
     const bench = snap.players
       .filter((p) => seg[p.name] === undefined && p.name !== gk && available(p, t))
       .map((p) => p.name).sort();
     const formation = snap.cfg.formation || DEFAULT_FORMATION[DEFAULT_SIZE];
     const row = (r) => slotsFor(r, formation[r]).map((slot) => {
       const name = Object.keys(sl).find((n) => sl[n] === slot);
-      return name ? chip(name, slot, h, s, interactive, compact, sub) : <div key={slot} className="min-w-[3rem]" />;
+      return name ? chip(name, slot, h, s, interactive, compact, forWhom[name]) : <div key={slot} className="min-w-[3rem]" />;
     });
+    const title = s === 0 ? (h === 0 ? "Starting lineup" : `${st.periodName(h)} lineup`) : `${st.starts[s]}m sub`;
     return (
-      <div className={`rounded-xl bg-emerald-700 text-white ${compact ? "p-1.5" : "p-2.5"}`}>
-        <div className={`flex justify-between font-semibold ${compact ? "text-[10px] mb-1 print:mb-0.5" : "text-xs mb-1.5"}`}>
-          <span>{st.periodName(h)} · {st.segLabels[s]}</span>
-          <span className="opacity-80 print:opacity-100">{gk} in goal</span>
+      <div className={`rounded-xl bg-slate-200 text-slate-900 ${compact ? "p-1.5" : "p-2.5"}`}>
+        <div className={`flex justify-between items-baseline ${compact ? "mb-1 print:mb-0.5" : "mb-1.5"}`}>
+          <span className={`font-extrabold ${compact ? "text-xs" : "text-base"}`}>{title}</span>
+          {s > 0 && <span className={`font-semibold text-slate-600 ${compact ? "text-[10px]" : "text-xs"}`}>{st.periodName(h)}</span>}
         </div>
-        <div className={`rounded-lg border-2 border-white/60 print:border-white ${compact ? "p-1 space-y-1 print:space-y-0.5" : "p-2 space-y-2"}`}>
+        <div className={`rounded-lg border-2 border-slate-600 ${compact ? "p-1 space-y-1 print:space-y-0.5" : "p-2 space-y-2"}`}>
           {["F", "M", "D"].map((r) => (
-            <div key={r} className={`flex justify-around ${compact ? "gap-0.5" : "gap-1"}`}>{row(r)}</div>
+            <div key={r} className={`flex justify-around items-stretch ${compact ? "gap-0.5" : "gap-1"}`}>{row(r)}</div>
           ))}
           <div className="flex justify-center">
-            <div className={`rounded-md bg-slate-900 text-white text-center ${compact ? "text-[9px] print:text-[10px] px-1 py-px min-w-[3.2rem]" : "text-xs px-2 py-1 min-w-[4.5rem]"}`}>
-              <span className="block font-semibold">{gk}</span>
-              <span className="block text-slate-400 print:text-slate-200">GK</span>
+            <div className={`rounded-md bg-white border-2 border-slate-900 outline-2 outline-white outline-offset-[-5px] text-center leading-tight ${compact ? "text-[11px] px-1.5 py-px min-w-[3.4rem]" : "text-sm px-2 py-0.5 min-w-[4.5rem]"}`}>
+              <span className="block font-bold">{gk}</span>
+              <span className={`block font-bold tracking-[0.12em] text-slate-500 ${compact ? "text-[8px]" : "text-[9px]"}`}>GK</span>
             </div>
           </div>
         </div>
-        <div className={`${compact ? "text-[9px] print:text-[10px] mt-1 print:mt-0.5" : "text-[11px] mt-1.5"} opacity-90 print:opacity-100 flex flex-wrap items-center gap-1`}>
-          <span>Bench:</span>
+        <div className={`${compact ? "text-[10px] mt-1 print:mt-0.5" : "text-xs mt-1.5"} flex flex-wrap items-center gap-1`}>
+          <span className="text-slate-600">Bench:</span>
           {bench.length === 0 && "—"}
-          {bench.map((n) => {
-            const label = sub.comingOn.includes(n) ? `▲ ${n}` : n;
-            if (!interactive) return <span key={n} className={sub.comingOn.includes(n) ? "font-bold underline" : ""}>{label}</span>;
+          {!interactive && <span>{bench.join(", ")}</span>}
+          {interactive && bench.map((n) => {
             const selected = pick && pick.h === h && pick.s === s && pick.name === n;
             const target = pick && pick.h === h && pick.s === s && !selected;
             return (
@@ -632,7 +624,7 @@ export default function LineupSolver() {
                 onDragOver={(e) => { if (target) e.preventDefault(); }}
                 onDrop={(e) => { e.preventDefault(); if (pick) doSwap(h, s, pick.name, n); }}
                 title="Tap or drag onto a player on the field to bring this player on in their place"
-                className={`px-1.5 py-0.5 rounded border border-white/50 bg-white/10 cursor-grab ${sub.comingOn.includes(n) ? "font-bold underline" : ""} ${selected ? "ring-2 ring-amber-400" : target ? "ring-2 ring-white/70" : ""}`}>{label}</button>
+                className={`px-1.5 py-0.5 rounded border border-slate-400 bg-white cursor-grab ${selected ? "ring-2 ring-amber-500 ring-offset-1" : target ? "ring-2 ring-emerald-500" : ""}`}>{n}</button>
             );
           })}
         </div>
@@ -695,7 +687,7 @@ export default function LineupSolver() {
         {snap.slots && (
           <section className="break-before-page">
             <h2 className="text-sm font-bold text-emerald-950 mb-1">Field positions by segment</h2>
-            <p className="text-[10px] text-slate-600 mb-2">Dashed box ▼ = comes off at the end of this segment, with who comes on for them. Underlined ▲ on the bench = coming on next.</p>
+            <p className="text-[10px] text-slate-600 mb-2">Each chart is the field after that whistle. A yellow dashed box is a player who just came on, with who they replaced underneath.</p>
             <div className="grid grid-cols-2 gap-x-2 gap-y-1">{allFields(snap, false, true)}</div>
           </section>
         )}
@@ -875,7 +867,7 @@ export default function LineupSolver() {
                         <>
                           <p className="text-sm text-slate-500 mb-3">
                             Tap a player, then any other player in that segment, to swap them. Same-row swaps just change sides and carry forward through the {tm.type === "halves" ? "half" : "quarter"}. Swapping across rows or with the bench changes that segment only, and the hard rules are re-checked below. No re-solve needed.
-                            <span className="block mt-1"><span className="inline-block w-3 h-3 rounded-sm bg-amber-200 border border-amber-500 align-middle mr-1" />▼ comes off at the end of this segment, with who comes on for them. On the bench, ▲ marks who is coming on next.</span>
+                            <span className="block mt-1"><span className="inline-block w-3 h-3 rounded-sm bg-yellow-200 border border-dashed border-slate-900 align-middle mr-1" />Each chart is the field after that whistle. A yellow dashed box is a player who just came on, with who they replaced underneath.</span>
                           </p>
                           <div className="grid sm:grid-cols-2 gap-3">{allFields(current, true, false)}</div>
                         </>
