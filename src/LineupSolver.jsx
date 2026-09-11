@@ -754,7 +754,7 @@ export default function LineupSolver() {
       <div className="max-w-6xl mx-auto p-4 md:p-8 print:hidden">
         <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h1 className="text-3xl font-extrabold tracking-tight text-emerald-950">Greyhounds lineup solver</h1>
+            <h1 className="text-3xl font-extrabold tracking-tight text-emerald-950">Greyhounds lineup solver <span className="text-xs font-medium text-slate-400 align-middle">v{__APP_VERSION__}</span></h1>
             <p className="text-slate-600 mt-1">
               {tm.P} {tm.type} of {tm.L} minutes, {subsPhrase}.
             </p>
