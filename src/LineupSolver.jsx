@@ -348,6 +348,8 @@ export default function LineupSolver() {
   const issues = useMemo(() => (result && edited ? checkLineup(result.plans, players, cfg, rules) : []), [result, edited, players, cfg, rules]);
   const hardIssues = issues.filter((i) => i.level === "hard");
   const noteIssues = issues.filter((i) => i.level === "note");
+  // On-and-straight-off subs the solver could not avoid with this roster.
+  const cameos = useMemo(() => (result && !edited ? checkLineup(result.plans, players, cfg, rules).filter((i) => i.text.includes("straight back off")) : []), [result, edited, players, cfg, rules]);
   const undoEdits = () => {
     if (!sol || !sol.original) return;
     setSol({ ...sol, result: sol.original.result, slots: sol.original.slots, edited: false });
@@ -830,6 +832,15 @@ export default function LineupSolver() {
                     </p>
                   </div>
                 )}
+                {cameos.length > 0 && (
+                  <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-amber-900">
+                    <p className="font-semibold">{cameos.length} sub{cameos.length === 1 ? "" : "s"} come{cameos.length === 1 ? "s" : ""} on for a single segment and straight back off.</p>
+                    <p className="text-sm mt-1">The solver avoids this wherever it can, but with this many players sharing the field evenly and nobody sitting twice in a row, there is no way round it.</p>
+                    <ul className="list-disc ml-5 mt-2 text-sm space-y-0.5">
+                      {cameos.map((i, k) => <li key={k}>{i.text}</li>)}
+                    </ul>
+                  </div>
+                )}
                 {result && edited && (
                   <div className={`rounded-xl border p-4 ${hardIssues.length ? "bg-red-50 border-red-300 text-red-900" : "bg-emerald-50 border-emerald-300 text-emerald-900"}`}>
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -875,7 +886,7 @@ export default function LineupSolver() {
                       {tab === "minutes" && mins && minutesTable(mins, players)}
                     </div>
                     <p className="text-xs text-slate-500">
-                      Built in: playing time is shared evenly among everyone who's here, nobody sits twice in a row (including across {tm.breakName}), goalies get a full {tm.type === "halves" ? "half" : "quarter"} in net plus about half of each other period on the field, and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
+                      Built in: playing time is shared evenly among everyone who's here, nobody sits twice in a row (including across {tm.breakName}), nobody comes on for a single segment and straight back off wherever the roster allows it, goalies get a full {tm.type === "halves" ? "half" : "quarter"} in net plus about half of each other period on the field, and players keep their position while they stay on the field. Positions follow each player's preference wherever the constraints allow. Shuffle explores different equally good schedules.
                     </p>
                   </>
                 )}

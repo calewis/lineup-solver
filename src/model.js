@@ -203,6 +203,10 @@ function playingTargets(players, cfg, tm) {
   return { isGoalie, onField, canPlay, avail, target };
 }
 
+// Objective cost of one on-and-straight-off sub, against preference weights
+// of 1 (first choice) and 0.5 (second choice) per segment.
+const ON_OFF_PENALTY = 20;
+
 export function buildModel(players, cfg, rules, seed) {
   const rnd = mulberry32(seed);
   const NEED = cfg.formation;
@@ -278,6 +282,19 @@ export function buildModel(players, cfg, rules, seed) {
       for (let t = 0; t < T - 1; t++) {
         if (onField(n, t) && onField(n, t + 1)) cons.push(`${y(n, t)} + ${y(n, t + 1)} >= 1`);
       }
+    }
+    // Avoid coming on for a single segment and straight back off. The first
+    // segment of a period is exempt: a starter being subbed is not a sub
+    // being subbed. This is a heavy penalty rather than a hard rule because
+    // some rosters cannot avoid it at all (e.g. 14 players at 9v9, where the
+    // even share plus no double sits leaves too few players for kickoff).
+    for (let i = 0; i < P; i++) for (let s = 1; s < S - 1; s++) {
+      const t = i * S + s;
+      if (!onField(n, t - 1) || !onField(n, t) || !onField(n, t + 1)) continue;
+      const v = `v_${idx[n]}_${t}`;
+      bins.add(v);
+      cons.push(`${y(n, t)} - ${y(n, t - 1)} - ${y(n, t + 1)} - ${v} <= 0`);
+      obj.push(`-${ON_OFF_PENALTY} ${v}`);
     }
     // Outfielders here for the whole game split their time evenly across periods.
     if (!isGoalie(n) && ts.length === T) {
@@ -403,6 +420,15 @@ export function checkLineup(plans, players, cfg, rules) {
       if (noDoubleSit && here && next && !(n in segAt(t)) && !(n in segAt(t + 1))) hard(`${n} sits out ${segLabel(t)} and ${segLabel(t + 1)} back to back.`);
       if ((t + 1) % S !== 0 && n in segAt(t) && n in segAt(t + 1) && segAt(t)[n] !== segAt(t + 1)[n]) {
         note(`${n} moves from ${ROLE_WORD[segAt(t)[n]]} to ${ROLE_WORD[segAt(t + 1)[n]]} without leaving the field (${segLabel(t + 1)}).`);
+      }
+    }
+    // On for a single segment and straight back off (period starts exempt).
+    // The solver avoids this wherever the roster allows, so a note, not a rule.
+    for (let i = 0; i < P; i++) for (let s = 1; s < S - 1; s++) {
+      const t = i * S + s;
+      const here = (u) => available(p, u) && n !== gkOf(u);
+      if (here(t - 1) && here(t) && here(t + 1) && !(n in segAt(t - 1)) && n in segAt(t) && !(n in segAt(t + 1))) {
+        note(`${n} comes on for ${segLabel(t)} and straight back off.`);
       }
     }
     // Outfielders here for the whole game split their time evenly across periods.
