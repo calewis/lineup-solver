@@ -174,6 +174,7 @@ export default function LineupSolver() {
   const [printGame, setPrintGame] = useState(null); // history entry id being printed
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmSolve, setConfirmSolve] = useState(null); // seed waiting for the coach's OK
   const [newName, setNewName] = useState("");
   const [pick, setPick] = useState(null); // chip selected for a swap
   const [swapNote, setSwapNote] = useState(null); // minutes impact of the last manual swap
@@ -200,8 +201,11 @@ export default function LineupSolver() {
     setTimeout(() => setNote(""), 2500);
   };
 
-  // A solution remembers the exact inputs it was built from. If any of them
-  // change, the solution is stale and disappears until the coach re-solves.
+  // A solution remembers the exact inputs it was built from. If the game's
+  // shape changes (segments, team size, formation) the solution can no
+  // longer be drawn and disappears until the coach re-solves. Any other
+  // change (availability, preferences, rules, goalies) leaves it on screen
+  // as an out-of-date lineup the coach can keep hand-editing mid-game.
   const solveWith = async (p, c, r, s) => {
     setSolving(true);
     let out;
@@ -217,10 +221,17 @@ export default function LineupSolver() {
     setSolving(false);
   };
   const run = (s = seed) => solveWith(players, cfg, rules, s);
-  const stale = !!sol && (sol.players !== players || sol.cfg !== cfg || sol.rules !== rules);
-  const result = sol && !stale ? sol.result : null;
-  const slots = sol && !stale ? sol.slots : null;
-  const failReason = sol && !stale && !sol.result ? sol.reason : null;
+  // Hand edits are precious on the sideline: ask before a solve replaces them.
+  const askRun = (s = seed) => { if (edited) setConfirmSolve(s); else run(s); };
+  const reshaped = !!sol && (() => {
+    const was = timingOf(sol.cfg);
+    return was.P !== tm.P || was.S !== tm.S || sol.cfg.size !== cfg.size ||
+      ROLES.some((r) => (sol.cfg.formation || {})[r] !== (cfg.formation || {})[r]);
+  })();
+  const stale = !!sol && !reshaped && (sol.players !== players || sol.cfg !== cfg || sol.rules !== rules);
+  const result = sol && !reshaped ? sol.result : null;
+  const slots = sol && !reshaped ? sol.slots : null;
+  const failReason = sol && !reshaped && !sol.result ? sol.reason : null;
 
   // Restore a saved setup and history. Only a saved setup gets solved on load;
   // otherwise the coach starts from a blank slate and presses Solve.
@@ -344,8 +355,10 @@ export default function LineupSolver() {
   }, [tm]);
 
   const mins = useMemo(() => (result ? minutesFor(result, players, cfg) : null), [result, players, cfg]);
-  const edited = !!sol && !stale && sol.edited;
-  const issues = useMemo(() => (result && edited ? checkLineup(result.plans, players, cfg, rules) : []), [result, edited, players, cfg, rules]);
+  const edited = !!sol && !reshaped && sol.edited;
+  // Check the lineup against the current setup after a hand edit, or after
+  // the setup changed underneath it.
+  const issues = useMemo(() => (result && (edited || stale) ? checkLineup(result.plans, players, cfg, rules) : []), [result, edited, stale, players, cfg, rules]);
   const hardIssues = issues.filter((i) => i.level === "hard");
   const noteIssues = issues.filter((i) => i.level === "note");
   const undoEdits = () => {
@@ -766,9 +779,9 @@ export default function LineupSolver() {
             ) : (
               <button onClick={() => setConfirmClear(true)} className={btn} title="Reset players, goalies, game and constraints to the defaults and forget the saved setup">Clear setup</button>
             )}
-            <button onClick={() => { const s = Math.floor(Math.random() * 1e6); setSeed(s); run(s); }} disabled={solving}
+            <button onClick={() => { const s = Math.floor(Math.random() * 1e6); setSeed(s); askRun(s); }} disabled={solving}
               className="px-3 py-2 rounded-lg border border-emerald-900 bg-white text-emerald-900 hover:bg-emerald-50 font-medium disabled:opacity-40">Shuffle</button>
-            <button onClick={() => run(seed)} disabled={solving} className={primary}>{solveLabel}</button>
+            <button onClick={() => askRun(seed)} disabled={solving} className={primary}>{solveLabel}</button>
           </div>
         </header>
 
@@ -801,13 +814,31 @@ export default function LineupSolver() {
 
             {lineupTab && (
               <>
-                {stale && (
+                {confirmSolve !== null && (
+                  <div className="bg-white border border-emerald-300 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+                    <p className="font-semibold text-emerald-950">Solving again will replace your hand-edited lineup.</p>
+                    <span className="flex gap-2">
+                      <button onClick={() => { const s = confirmSolve; setConfirmSolve(null); run(s); }} className={primary}>Replace it</button>
+                      <button onClick={() => setConfirmSolve(null)} className={btn}>Keep my edits</button>
+                    </span>
+                  </div>
+                )}
+                {reshaped && (
                   <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <p className="font-semibold">Setup changed.</p>
-                      <p className="text-sm mt-1">The previous lineup no longer matches your setup. Solve again to build a new one.</p>
+                      <p className="font-semibold">Game format changed.</p>
+                      <p className="text-sm mt-1">The previous lineup was built for a different number of segments, team size or formation, so it can't be shown. Solve again to build a new one.</p>
                     </div>
                     <button onClick={() => run(seed)} disabled={solving} className={primary}>{solveLabel}</button>
+                  </div>
+                )}
+                {stale && result && (
+                  <div className="bg-sky-50 border border-sky-300 rounded-xl p-4 text-sky-900 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="font-semibold">Setup changed since this lineup was solved.</p>
+                      <p className="text-sm mt-1">Keep using it as is: hand edits, printing and history all still work, and anything it now breaks is listed below. Or solve again for a fresh one.</p>
+                    </div>
+                    <button onClick={() => askRun(seed)} disabled={solving} className={primary}>{solveLabel}</button>
                   </div>
                 )}
                 {!sol && !solving && (
@@ -830,15 +861,15 @@ export default function LineupSolver() {
                     </p>
                   </div>
                 )}
-                {result && edited && (
+                {result && (edited || hardIssues.length > 0) && (
                   <div className={`rounded-xl border p-4 ${hardIssues.length ? "bg-red-50 border-red-300 text-red-900" : "bg-emerald-50 border-emerald-300 text-emerald-900"}`}>
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <p className="font-semibold">
                         {hardIssues.length
-                          ? `Hand-edited lineup breaks ${hardIssues.length} hard rule${hardIssues.length === 1 ? "" : "s"}.`
+                          ? `${edited ? "Hand-edited lineup" : "This lineup"} breaks ${hardIssues.length} hard rule${hardIssues.length === 1 ? "" : "s"}. It still works as it is.`
                           : "Hand-edited lineup. All hard rules still hold."}
                       </p>
-                      <button onClick={undoEdits} className={btn}>Undo edits</button>
+                      {edited && <button onClick={undoEdits} className={btn}>Undo edits</button>}
                     </div>
                     {hardIssues.length > 0 && (
                       <ul className="list-disc ml-5 mt-2 text-sm space-y-0.5">
